@@ -45,7 +45,6 @@ This is not a request to port all of HMMER. Implement only the minimal profile-H
    - Zero-based input start and end coordinates
    - IMGT residue numbering with insertion codes
    - Bit score
-   - Confidence or score margin
    - Configurable number of alternative profile hits
    - HMMER-compatible E-value when it can be implemented accurately
    - Padded IMGT alignment
@@ -116,7 +115,6 @@ interface DomainResult {
   end: number;
   bitScore: number;
   eValue?: number;
-  confidence?: number;
   numbering: NumberedResidue[];
   paddedImgtAlignment: string;
   alternativeHits: ProfileHit[];
@@ -313,7 +311,6 @@ Produce:
     - Build and release procedure
     - Size breakdown
     - Benchmark results
-11. A migration example showing how an existing Python validation API can be replaced by the WASM implementation.
 
 ## Acceptance criteria
 
