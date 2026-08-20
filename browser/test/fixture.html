@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>anarcism browser test</title>
+<script type="module">
+  import init, * as api from "/index.js";
+  globalThis.anarcismApi = api;
+  globalThis.anarcismStage = "initializing";
+  const initializationStarted = performance.now();
+  globalThis.anarcismReady = init("/anarcism.wasm").then(
+    (value) => {
+      globalThis.anarcismInitializationMs = performance.now() - initializationStarted;
+      globalThis.anarcismStage = "ready";
+      return value;
+    },
+    (error) => {
+      globalThis.anarcismStage = `error: ${error}`;
+      throw error;
+    },
+  );
+</script>

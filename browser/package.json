@@ -1,0 +1,35 @@
+{
+  "name": "@revanta/anarcism",
+  "version": "0.1.0",
+  "description": "Slim browser-native ANARCI-compatible IMGT numbering",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./anarcism.wasm": "./dist/anarcism.wasm"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "../tools/build-browser.sh",
+    "test": "node --test test/node.test.mjs",
+    "test:browsers": "playwright test",
+    "test:types": "tsc --noEmit",
+    "benchmark": "node bench/benchmark.mjs",
+    "benchmark:browser": "node bench/browser-benchmark.mjs",
+    "parity": "node ../tools/parity-report.mjs",
+    "size": "node ../tools/size-report.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "typescript": "7.0.2"
+  },
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  }
+}
