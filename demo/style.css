@@ -1,0 +1,43 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  margin: 3rem auto;
+  max-width: 60rem;
+  padding: 0 1.25rem;
+}
+
+textarea,
+pre {
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  width: 100%;
+}
+
+textarea {
+  margin-top: 0.5rem;
+  resize: vertical;
+}
+
+.actions {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+button {
+  padding: 0.55rem 0.9rem;
+}
+
+pre {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}

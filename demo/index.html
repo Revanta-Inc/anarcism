@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>anarcism browser demo</title>
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main>
+      <h1>anarcism</h1>
+      <p>IMGT numbering runs locally in WebAssembly. Sequences never leave this page.</p>
+      <label for="sequence">Protein sequence</label>
+      <textarea id="sequence" rows="8" spellcheck="false">EVQLQQSGAEVVRSGASVKLSCTASGFNIKDYYIHWVKQRPEKGLEWIGWIDPEIGDTEYVPKFQGKATMTADTSSNTAYLQLSSLTSEDTAVYYCNAGHDYDRGRFPYWGQGTLVTVSAA</textarea>
+      <div class="actions">
+        <button id="number" disabled>Loading WASM…</button>
+        <label><input id="germline" type="checkbox"> Assign V/J germline</label>
+      </div>
+      <p id="status" role="status"></p>
+      <pre id="result" aria-live="polite"></pre>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
