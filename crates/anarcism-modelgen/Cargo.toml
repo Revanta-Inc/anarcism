@@ -1,0 +1,16 @@
+[package]
+name = "anarcism-modelgen"
+description = "Deterministic compact model-data generator for anarcism"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anarcism-modelgen"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
