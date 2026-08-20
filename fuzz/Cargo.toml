@@ -1,0 +1,36 @@
+[package]
+name = "anarcism-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+anarcism-core = { path = "../crates/anarcism-core" }
+libfuzzer-sys = "0.4.10"
+
+[[bin]]
+name = "profile_decode"
+path = "fuzz_targets/profile_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "germline_decode"
+path = "fuzz_targets/germline_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sequence_inputs"
+path = "fuzz_targets/sequence_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
