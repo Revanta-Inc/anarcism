@@ -1,0 +1,16 @@
+[package]
+name = "anarcism-wasm"
+description = "Minimal C-ABI WebAssembly bridge for anarcism"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anarcism-core = { path = "../anarcism-core" }
+serde.workspace = true
+serde_json.workspace = true
