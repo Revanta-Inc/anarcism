@@ -1,14 +1,14 @@
 [project]
 name = "anarcism"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pinned native reference environment for anarcism compatibility generation"
 readme = "README.md"
 authors = [
     { name = "Moritz Onken", email = "mo@revanta.bio" }
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "anarci>=2026.2.13.2",
+    "anarci==2026.2.13.2",
 ]
 
 [project.scripts]

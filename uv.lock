@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "anarci", specifier = ">=2026.2.13.2" }]
+requires-dist = [{ name = "anarci", specifier = "==2026.2.13.2" }]
 
 [[package]]
 name = "biopython"
