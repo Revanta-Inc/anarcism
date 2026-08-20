@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-and-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.94
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup default 1.94.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: browser/package-lock.json
+
+      - name: Install Binaryen
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binaryen
+
+      - name: Check Rust
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
+
+      - name: Install browser development dependencies
+        working-directory: browser
+        run: npm ci
+
+      - name: Build and enforce compressed size
+        run: tools/build-browser.sh
+
+      - name: Test Node, declarations, and golden parity
+        working-directory: browser
+        run: |
+          npm test
+          npm run test:types
+          npm run parity
+
+      - name: Install browser runtimes
+        working-directory: browser
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Test Chromium, Firefox, and WebKit
+        working-directory: browser
+        run: npm run test:browsers
+
+      - name: Inspect package contents
+        working-directory: browser
+        run: npm pack --dry-run
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anarcism-browser
+          path: browser/dist
+          if-no-files-found: error
+

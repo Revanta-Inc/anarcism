@@ -1,0 +1,33 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fuzz toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Fuzz compact profile decoder
+        working-directory: fuzz
+        run: cargo +nightly fuzz run profile_decode -- -max_total_time=30
+
+      - name: Fuzz compact germline decoder
+        working-directory: fuzz
+        run: cargo +nightly fuzz run germline_decode -- -max_total_time=30
+
+      - name: Fuzz sequence and FASTA inputs
+        working-directory: fuzz
+        run: cargo +nightly fuzz run sequence_inputs -- -max_total_time=30
