@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/anarcism-core",
+    "crates/anarcism-modelgen",
+    "crates/anarcism-wasm",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Moritz Onken <mo@revanta.bio>"]
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/revanta/anarcism"
+
+[workspace.dependencies]
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+debug = true
+

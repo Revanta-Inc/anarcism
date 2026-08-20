@@ -5,6 +5,11 @@ build/
 dist/
 wheels/
 *.egg-info
+target/
+node_modules/
+test-results/
+playwright-report/
+*.tgz
 
 # Virtual environments
 .venv
