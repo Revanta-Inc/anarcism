@@ -8,26 +8,64 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # libFuzzer needs a nightly compiler. Pinning the date keeps a nightly
+  # regression from failing this job for reasons unrelated to the code, and
+  # keeps the build cache from being invalidated every single day.
+  NIGHTLY: nightly-2026-08-01
+  CARGO_FUZZ_VERSION: 0.13.2
+
 jobs:
   fuzz-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: Install fuzz toolchain
+      - name: Install the pinned nightly toolchain
+        run: rustup toolchain install "${NIGHTLY}" --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: ${{ env.NIGHTLY }}
+
+      # cargo-fuzz publishes prebuilt binaries, so this replaces a
+      # multi-minute `cargo install` from source on every scheduled run.
+      - name: Install cargo-fuzz ${{ env.CARGO_FUZZ_VERSION }}
         run: |
-          rustup toolchain install nightly --profile minimal
-          cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+          curl -fsSL --retry 3 \
+            "https://github.com/rust-fuzz/cargo-fuzz/releases/download/${CARGO_FUZZ_VERSION}/cargo-fuzz-${CARGO_FUZZ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "$HOME/.cargo/bin"
+          chmod +x "$HOME/.cargo/bin/cargo-fuzz"
+          cargo fuzz --version
 
       - name: Fuzz compact profile decoder
         working-directory: fuzz
-        run: cargo +nightly fuzz run profile_decode -- -max_total_time=30
+        run: cargo "+${NIGHTLY}" fuzz run profile_decode -- -max_total_time=30
 
       - name: Fuzz compact germline decoder
         working-directory: fuzz
-        run: cargo +nightly fuzz run germline_decode -- -max_total_time=30
+        run: cargo "+${NIGHTLY}" fuzz run germline_decode -- -max_total_time=30
 
       - name: Fuzz sequence and FASTA inputs
         working-directory: fuzz
-        run: cargo +nightly fuzz run sequence_inputs -- -max_total_time=30
+        run: cargo "+${NIGHTLY}" fuzz run sequence_inputs -- -max_total_time=30
+
+      # A crash leaves a reproducer behind; without this it is lost with the
+      # runner and the failure cannot be reproduced locally.
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
