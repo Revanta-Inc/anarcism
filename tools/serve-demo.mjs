@@ -13,7 +13,11 @@ const contentTypes = new Map([
 
 createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
-  const relative = url.pathname === "/" ? "demo/index.html" : url.pathname.slice(1);
+  if (url.pathname === "/") {
+    response.writeHead(302, { location: "/demo/" }).end();
+    return;
+  }
+  const relative = url.pathname === "/demo/" ? "demo/index.html" : url.pathname.slice(1);
   const path = resolve(root, relative);
   if (!path.startsWith(`${root}${sep}`)) {
     response.writeHead(403).end();

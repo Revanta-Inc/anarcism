@@ -1,24 +1,480 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>anarcism browser demo</title>
-    <link rel="stylesheet" href="./style.css">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>anarcism — browser IMGT numbering</title>
+    <style>
+      /* Dependency-free by design: no fonts, no CSS framework, no CDN. */
+      :root {
+        --bg: #fbfbfd;
+        --panel: #fff;
+        --ink: #16181d;
+        --muted: #666e7a;
+        --line: #e3e6ec;
+        --accent: #2f5fe0;
+        --fr: #eef1f6;
+        --fr-ink: #4a5262;
+        --cdr1: #ffe6b8;
+        --cdr1-ink: #7a4d00;
+        --cdr2: #cdeccf;
+        --cdr2-ink: #1d5a24;
+        --cdr3: #ffd0d6;
+        --cdr3-ink: #8c1d2c;
+        --ok: #17794a;
+        --bad: #b3261e;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #14161a;
+          --panel: #1b1e24;
+          --ink: #e8eaee;
+          --muted: #9aa3b0;
+          --line: #2b3038;
+          --accent: #7aa2ff;
+          --fr: #262b33;
+          --fr-ink: #aab3c0;
+          --cdr1: #5c4413;
+          --cdr1-ink: #ffd98a;
+          --cdr2: #1e4a26;
+          --cdr2-ink: #a5e0ad;
+          --cdr3: #5e222b;
+          --cdr3-ink: #ffb4bd;
+          --ok: #6ee7a8;
+          --bad: #ff8b82;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      header { max-width: 1200px; margin: 0 auto 20px; }
+      h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+      .sub { color: var(--muted); font-size: 13px; }
+      .wrap {
+        max-width: 1200px; margin: 0 auto;
+        display: grid; grid-template-columns: 340px 1fr; gap: 20px;
+      }
+      @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } }
+      .panel {
+        background: var(--panel); border: 1px solid var(--line);
+        border-radius: 10px; padding: 16px;
+      }
+      label { display: block; font-weight: 600; font-size: 12px;
+              text-transform: uppercase; letter-spacing: .04em;
+              color: var(--muted); margin: 14px 0 6px; }
+      label:first-of-type { margin-top: 0; }
+      textarea, select, input[type=number] {
+        width: 100%; padding: 8px; border: 1px solid var(--line);
+        border-radius: 6px; background: var(--bg); color: var(--ink);
+        font-family: var(--mono); font-size: 12px;
+      }
+      textarea { height: 150px; resize: vertical; word-break: break-all; }
+      select[multiple] { height: 110px; font-family: inherit; }
+      button {
+        background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+        padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+      }
+      button:disabled { opacity: .5; cursor: default; }
+      button.ghost {
+        background: transparent; color: var(--accent);
+        border: 1px solid var(--line); font-weight: 500; padding: 6px 10px;
+        font-size: 12px;
+      }
+      .row { display: flex; gap: 6px; flex-wrap: wrap; }
+      .checks { display: flex; gap: 10px; flex-wrap: wrap; }
+      .checks label {
+        margin: 0; text-transform: none; letter-spacing: 0; font-size: 13px;
+        font-weight: 500; color: var(--ink);
+        display: flex; align-items: center; gap: 5px;
+      }
+      .stats {
+        display: flex; gap: 18px; flex-wrap: wrap;
+        border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px;
+        font-size: 12px; color: var(--muted);
+      }
+      .stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+      .seqhead {
+        display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+        border-bottom: 1px solid var(--line); padding-bottom: 8px;
+        margin-bottom: 12px;
+      }
+      .seqhead h2 { font-size: 15px; margin: 0; font-family: var(--mono); }
+      .domain { margin: 18px 0 26px; }
+      .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+      .badge {
+        font-size: 12px; padding: 3px 9px; border-radius: 20px;
+        background: var(--fr); color: var(--fr-ink);
+        border: 1px solid var(--line); font-variant-numeric: tabular-nums;
+      }
+      .badge.chain { background: var(--accent); color: #fff; border-color: transparent;
+                     font-weight: 700; }
+      .grid { display: flex; flex-wrap: wrap; gap: 2px; }
+      .res {
+        width: 26px; text-align: center; border-radius: 4px; padding: 2px 0 3px;
+        font-family: var(--mono); line-height: 1.15;
+      }
+      .res .p { font-size: 8px; opacity: .75; display: block;
+                font-variant-numeric: tabular-nums; }
+      .res .a { font-size: 13px; font-weight: 600; }
+      .res.gap .a { opacity: .3; }
+      .FR1, .FR2, .FR3, .FR4 { background: var(--fr); color: var(--fr-ink); }
+      .CDR1 { background: var(--cdr1); color: var(--cdr1-ink); }
+      .CDR2 { background: var(--cdr2); color: var(--cdr2-ink); }
+      .CDR3 { background: var(--cdr3); color: var(--cdr3-ink); }
+      .legend { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 4px; }
+      .legend span { font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+      .aln {
+        font-family: var(--mono); font-size: 11px; word-break: break-all;
+        color: var(--muted); margin-top: 10px; padding: 8px;
+        background: var(--bg); border-radius: 6px; border: 1px solid var(--line);
+      }
+      .none { color: var(--muted); font-style: italic; padding: 8px 0; }
+      .err {
+        color: var(--bad); border: 1px solid currentColor; border-radius: 6px;
+        padding: 10px; font-family: var(--mono); font-size: 12px;
+      }
+      details { margin-top: 8px; }
+      summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+      table { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+      td, th { text-align: left; padding: 3px 12px 3px 0; }
+      th { color: var(--muted); font-weight: 600; }
+    </style>
   </head>
   <body>
-    <main>
+    <header>
       <h1>anarcism</h1>
-      <p>IMGT numbering runs locally in WebAssembly. Sequences never leave this page.</p>
-      <label for="sequence">Protein sequence</label>
-      <textarea id="sequence" rows="8" spellcheck="false">EVQLQQSGAEVVRSGASVKLSCTASGFNIKDYYIHWVKQRPEKGLEWIGWIDPEIGDTEYVPKFQGKATMTADTSSNTAYLQLSSLTSEDTAVYYCNAGHDYDRGRFPYWGQGTLVTVSAA</textarea>
-      <div class="actions">
-        <button id="number" disabled>Loading WASM…</button>
-        <label><input id="germline" type="checkbox"> Assign V/J germline</label>
+      <div class="sub">
+        Antibody and TCR variable-domain recognition and IMGT numbering, running
+        in a dedicated worker. Sequences never leave this tab.
       </div>
-      <p id="status" role="status"></p>
-      <pre id="result" aria-live="polite"></pre>
-    </main>
-    <script type="module" src="./app.js"></script>
+    </header>
+
+    <div class="wrap">
+      <div class="panel">
+        <label for="seq">Sequence or FASTA</label>
+        <textarea id="seq" spellcheck="false"
+                  placeholder="Paste one sequence, or FASTA with &gt; headers"></textarea>
+
+        <div class="row" style="margin-top: 8px">
+          <button class="ghost" data-ex="vh">Trastuzumab VH</button>
+          <button class="ghost" data-ex="vl">Trastuzumab VL</button>
+          <button class="ghost" data-ex="scfv">scFv (VH-linker-VL)</button>
+          <button class="ghost" data-ex="fasta">FASTA (all three)</button>
+          <button class="ghost" data-ex="lys">Lysozyme (negative)</button>
+        </div>
+
+        <label>Allowed chains</label>
+        <div class="checks" id="chains"></div>
+
+        <label for="species">Allowed species <span style="text-transform:none;font-weight:400">(none selected = all)</span></label>
+        <select id="species" multiple></select>
+
+        <label for="minscore">Minimum bit score</label>
+        <input type="number" id="minscore" value="80" step="1" min="0" />
+
+        <label>Options</label>
+        <div class="checks">
+          <label><input type="checkbox" id="germline" /> Assign germline</label>
+          <label><input type="checkbox" id="alts" /> Alternative hits</label>
+        </div>
+
+        <div style="margin-top:16px">
+          <button id="run" disabled>Number</button>
+        </div>
+
+        <div class="stats">
+          <span>init <b id="t-init">—</b></span>
+          <span>last run <b id="t-run">—</b></span>
+          <span>per seq <b id="t-per">—</b></span>
+          <span>v<b id="ver">—</b></span>
+        </div>
+      </div>
+
+      <div class="panel" id="out">
+        <div class="none">Loading module…</div>
+      </div>
+    </div>
+
+    <script type="module">
+      const VH =
+        'EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS';
+      const VL =
+        'DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK';
+      const LINKER = 'GGGGSGGGGSGGGGS';
+      const LYS =
+        'KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL';
+
+      const EXAMPLES = {
+        vh: VH,
+        vl: VL,
+        scfv: VH + LINKER + VL,
+        lys: LYS,
+        fasta: `>trastuzumab_vh\n${VH}\n>trastuzumab_vl\n${VL}\n>trastuzumab_scfv\n${VH + LINKER + VL}\n`,
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const out = $('out');
+      const REGIONS = ['FR1', 'CDR1', 'FR2', 'CDR2', 'FR3', 'CDR3', 'FR4'];
+      const workerStarted = performance.now();
+      const analysisWorker = new Worker(new URL('./worker.js', import.meta.url), {
+        type: 'module',
+        name: 'anarcism',
+      });
+      const pendingRequests = new Map();
+      let nextRequestId = 1;
+      let ready = false;
+      let resolveInitialization;
+      let rejectInitialization;
+      const initialization = new Promise((resolve, reject) => {
+        resolveInitialization = resolve;
+        rejectInitialization = reject;
+      });
+
+      analysisWorker.addEventListener('message', (event) => {
+        const message = event.data;
+        if (message?.type === 'ready') {
+          resolveInitialization(message);
+          return;
+        }
+        if (message?.type === 'initializationError') {
+          rejectInitialization(asError(message.error));
+          return;
+        }
+
+        const pending = pendingRequests.get(message?.requestId);
+        if (!pending) return;
+        pendingRequests.delete(message.requestId);
+        if (message.type === 'result') pending.resolve(message);
+        else pending.reject(asError(message.error));
+      });
+
+      analysisWorker.addEventListener('error', (event) => {
+        const error = new Error(event.message || 'the analysis worker failed');
+        rejectInitialization(error);
+        for (const pending of pendingRequests.values()) pending.reject(error);
+        pendingRequests.clear();
+        ready = false;
+        setBusy(false);
+      });
+
+      // --- init, measured -------------------------------------------------
+      try {
+        const metadata = await initialization;
+        const initMs = performance.now() - workerStarted;
+        $('t-init').textContent = `${initMs.toFixed(1)} ms`;
+        $('ver').textContent = metadata.version;
+
+        // Populate the pickers from the embedded profile inventory.
+        for (const c of metadata.chains) {
+          const l = document.createElement('label');
+          const i = document.createElement('input');
+          i.type = 'checkbox';
+          i.value = c;
+          i.className = 'chain';
+          l.append(i, document.createTextNode(c));
+          $('chains').append(l);
+        }
+        for (const s of metadata.species) {
+          const o = document.createElement('option');
+          o.value = o.textContent = s;
+          $('species').append(o);
+        }
+
+        ready = true;
+        setBusy(false);
+        $('seq').value = VH;
+        out.innerHTML = '<div class="none">Ready. Press Number.</div>';
+      } catch (error) {
+        $('t-init').textContent = 'failed';
+        setBusy(false);
+        out.innerHTML = '';
+        const message = document.createElement('div');
+        message.className = 'err';
+        message.textContent = `Initialization failed: ${error.message}`;
+        out.append(message);
+      }
+
+      // --- wiring ---------------------------------------------------------
+      for (const b of document.querySelectorAll('[data-ex]')) {
+        b.addEventListener('click', () => {
+          $('seq').value = EXAMPLES[b.dataset.ex];
+          run();
+        });
+      }
+      $('run').addEventListener('click', run);
+      $('seq').addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') run();
+      });
+
+      function options() {
+        const chains = [...document.querySelectorAll('.chain:checked')].map((c) => c.value);
+        const species = [...$('species').selectedOptions].map((o) => o.value);
+        const o = {
+          assignGermline: $('germline').checked,
+          alternativeHitCount: $('alts').checked ? 3 : 0,
+        };
+        if (chains.length) o.allowedChains = chains;
+        if (species.length) o.allowedSpecies = species;
+        const min = Number($('minscore').value);
+        if (Number.isFinite(min)) o.minBitScore = min;
+        return o;
+      }
+
+      async function run() {
+        const text = $('seq').value.trim();
+        if (!ready || !text) return;
+        let results;
+        const t = performance.now();
+        setBusy(true);
+        try {
+          ({ results } = await numberInWorker(text, options()));
+        } catch (e) {
+          // `code` is the stable identifier; the message never contains
+          // sequence content, so it is safe to show.
+          out.innerHTML = '';
+          const d = document.createElement('div');
+          d.className = 'err';
+          d.textContent = `${e.code ?? 'error'}: ${e.message}`;
+          out.append(d);
+          $('t-run').textContent = '—';
+          $('t-per').textContent = '—';
+          return;
+        } finally {
+          setBusy(false);
+        }
+        const ms = performance.now() - t;
+        $('t-run').textContent = `${ms.toFixed(2)} ms`;
+        $('t-per').textContent = `${(ms / Math.max(results.length, 1)).toFixed(2)} ms`;
+        render(results);
+      }
+
+      function numberInWorker(text, requestOptions) {
+        const requestId = nextRequestId++;
+        return new Promise((resolve, reject) => {
+          pendingRequests.set(requestId, { resolve, reject });
+          analysisWorker.postMessage({
+            type: 'number',
+            requestId,
+            fasta: text.startsWith('>'),
+            text,
+            options: requestOptions,
+          });
+        });
+      }
+
+      function setBusy(busy) {
+        $('run').disabled = busy || !ready;
+        $('run').textContent = busy ? 'Numbering…' : 'Number';
+        for (const button of document.querySelectorAll('[data-ex]')) {
+          button.disabled = busy || !ready;
+        }
+      }
+
+      function asError(value) {
+        const error = new Error(value?.message ?? 'anarcism failed');
+        error.code = value?.code ?? 'INTERNAL';
+        error.inputId = value?.inputId;
+        return error;
+      }
+
+      // --- rendering ------------------------------------------------------
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+
+      function badge(text, cls = 'badge') {
+        return el('span', cls, text);
+      }
+
+      function render(results) {
+        out.innerHTML = '';
+
+        const legend = el('div', 'legend');
+        for (const r of REGIONS) {
+          legend.append(el('span', r, r));
+        }
+        out.append(legend);
+
+        for (const r of results) {
+          const head = el('div', 'seqhead');
+          head.append(el('h2', null, r.id || '(sequence)'));
+          head.append(
+            el('span', 'sub', `${r.normalizedSequence.length} aa · ${r.domains.length} domain${r.domains.length === 1 ? '' : 's'}`)
+          );
+          out.append(head);
+
+          for (const w of r.warnings) out.append(el('div', 'err', w));
+
+          if (!r.domains.length) {
+            out.append(el('div', 'none', 'No variable domain detected.'));
+            continue;
+          }
+
+          for (const d of r.domains) {
+            const box = el('div', 'domain');
+            const bs = el('div', 'badges');
+            bs.append(badge(d.chainType, 'badge chain'));
+            bs.append(badge(d.receptorType));
+            bs.append(badge(d.species));
+            bs.append(badge(`${d.start}–${d.end}`));
+            bs.append(badge(`bit ${d.bitScore.toFixed(1)}`));
+            bs.append(badge(`E ${formatE(d.eValue)}`));
+            if (d.germline) {
+              bs.append(
+                badge(
+                  `${d.germline.species} · ${d.germline.vGene ?? '?'} ${pct(d.germline.vIdentity)}` +
+                    ` · ${d.germline.jGene ?? '?'} ${pct(d.germline.jIdentity)}`
+                )
+              );
+            }
+            box.append(bs);
+
+            const grid = el('div', 'grid');
+            for (const n of d.numbering) {
+              const cell = el('div', `res ${n.region}${n.aminoAcid === '-' ? ' gap' : ''}`);
+              cell.append(el('span', 'p', `${n.position}${n.insertionCode}`));
+              cell.append(el('span', 'a', n.aminoAcid));
+              cell.title = `${n.region} · IMGT ${n.position}${n.insertionCode} · ${n.aminoAcid}` +
+                (n.sequenceIndex >= 0 ? ` · input index ${n.sequenceIndex}` : ' · scheme gap');
+              grid.append(cell);
+            }
+            box.append(grid);
+            box.append(el('div', 'aln', d.paddedImgtAlignment));
+
+            if (d.alternativeHits.length) {
+              const det = el('details');
+              det.append(el('summary', null, `${d.alternativeHits.length} alternative hits`));
+              const t = el('table');
+              t.innerHTML =
+                '<tr><th>profile</th><th>chain</th><th>species</th><th>bit</th><th>E</th></tr>';
+              for (const h of d.alternativeHits) {
+                const tr = el('tr');
+                for (const v of [h.profile, h.chainType, h.species, h.bitScore.toFixed(1), formatE(h.eValue)]) {
+                  tr.append(el('td', null, v));
+                }
+                t.append(tr);
+              }
+              det.append(t);
+              box.append(det);
+            }
+            out.append(box);
+          }
+        }
+      }
+
+      const pct = (v) => (v === undefined ? '' : `${(v * 100).toFixed(1)}%`);
+      const formatE = (v) =>
+        v === undefined ? '—' : v === 0 ? '0' : v < 1e-4 ? v.toExponential(1) : v.toPrecision(3);
+    </script>
   </body>
 </html>
