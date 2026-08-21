@@ -1,0 +1,82 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  # A superseded deployment is still a deployment: let it finish rather than
+  # leaving the site half-published.
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Must match `ci.yml` and `docs/build-release.md`: `wasm-opt` output is not
+  # stable across Binaryen versions, and `tools/build-browser.sh` gates on size.
+  BINARYEN_VERSION: 132
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Binaryen ${{ env.BINARYEN_VERSION }}
+        run: |
+          version="${BINARYEN_VERSION}"
+          curl -fsSL --retry 3 \
+            "https://github.com/WebAssembly/binaryen/releases/download/version_${version}/binaryen-version_${version}-x86_64-linux.tar.gz" \
+            | tar xz -C /opt
+          echo "/opt/binaryen-version_${version}/bin" >> "$GITHUB_PATH"
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      # The demo imports `browser/dist`, which is a build artifact and is not
+      # committed, so the WASM package is built first.
+      - name: Build the browser package
+        run: tools/build-browser.sh
+
+      - name: Build the demo
+        working-directory: demo
+        run: npm run build
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

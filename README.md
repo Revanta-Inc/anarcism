@@ -143,13 +143,15 @@ The residual score difference comes from high-precision profile quantization and
 
 ## Development
 
+`browser` and `demo` are npm workspaces of the repository root, so a single `npm ci` there installs both from the one `package-lock.json`.
+
 ```sh
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 tools/build-browser.sh
-cd browser
 npm ci
+cd browser
 npm test
 npm run test:types
 npm run parity
@@ -164,9 +166,9 @@ The comparison benchmark requires `uv sync --locked --no-install-project --no-de
 The demo is a Preact application built with Vite and Tailwind. It imports `browser/dist` through the `@anarcism` alias, so it exercises the published package the way an npm dependent would; `tools/build-browser.sh` has to run first.
 
 ```sh
+npm ci               # at the repository root, once for both workspaces
 tools/build-browser.sh
 cd demo
-npm ci
 npm run dev          # http://localhost:5173/
 npm run build        # type-checks, then writes demo/dist
 ```

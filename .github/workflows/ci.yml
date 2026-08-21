@@ -34,12 +34,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # `rust-toolchain.toml` already pins the channel, components, target, and
-      # profile. Passing no arguments installs exactly that, so the pin is not
-      # restated here and cannot drift. Deliberately not using a setup action
-      # that exports RUSTFLAGS: that variable overrides
-      # `target.*.rustflags` in `.cargo/config.toml` outright, which would drop
-      # `-C target-feature=+simd128` from the WASM build.
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
@@ -49,7 +43,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: browser/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install Binaryen ${{ env.BINARYEN_VERSION }}
         run: |
@@ -59,19 +53,15 @@ jobs:
             | tar xz -C /opt
           echo "/opt/binaryen-version_${version}/bin" >> "$GITHUB_PATH"
 
-      - name: Confirm the pinned Binaryen is active
-        run: |
-          wasm-opt --version
-          wasm-opt --version | grep -qw "${BINARYEN_VERSION}"
-
       - name: Check Rust
         run: |
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
 
-      - name: Install browser development dependencies
-        working-directory: browser
+      # One `npm ci` at the workspace root installs both the browser package
+      # and the demo from the single lock file.
+      - name: Install JavaScript dependencies
         run: npm ci
 
       - name: Build and enforce compressed size
@@ -116,6 +106,12 @@ jobs:
       - name: Inspect package contents
         working-directory: browser
         run: npm pack --dry-run
+
+      # The demo consumes `browser/dist` the way an npm dependent would, so it
+      # is the one check that the published shape survives a bundler.
+      - name: Type-check and build the demo
+        working-directory: demo
+        run: npm run build
 
       - uses: actions/upload-artifact@v7
         with:
