@@ -38,11 +38,13 @@ python-source = "python"
 features = ["pyo3/extension-module"]
 profile = "python"
 # `cargo package --list` only reports files inside the selected crate, so the
-# embedded model binaries, the pinned toolchain, and the notices have to be
-# named explicitly or the sdist produces a wheel that cannot compile.
+# embedded model binaries and the notices have to be named explicitly or the
+# sdist produces a wheel that cannot compile. `rust-toolchain.toml` is
+# deliberately absent: it pins an exact channel plus a wasm target that the
+# wheel never needs, and shipping it would force that download on anyone
+# building from source. `rust-version` in the crate reports a too-old toolchain.
 include = [
     { path = "assets/**/*", format = "sdist" },
-    { path = "rust-toolchain.toml", format = "sdist" },
     { path = "THIRD_PARTY_NOTICES.md", format = "sdist" },
 ]
 

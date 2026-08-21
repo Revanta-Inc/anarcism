@@ -2,6 +2,7 @@
 members = [
     "crates/anarcism-core",
     "crates/anarcism-modelgen",
+    "crates/anarcism-python",
     "crates/anarcism-wasm",
 ]
 resolver = "3"
@@ -24,6 +25,15 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# The golden corpus and property tests are compute-bound, so an unoptimized
+# build dominates test wall clock. Optimizing keeps the run short while the
+# debug assertions and integer overflow checks that guard the DP kernels stay
+# on; `dev` is left alone so iterative builds stay fast to compile.
+[profile.test]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
 
 [profile.bench]
 inherits = "release"
