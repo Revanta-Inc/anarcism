@@ -238,7 +238,7 @@ Use size-oriented Rust/WASM configuration, including where appropriate:
 - Minimal allocator and formatting machinery
 - Carefully selected dependencies with documented size costs
 
-The baseline implementation must not require WASM threads, shared memory, filesystem access, server calls, Python, or browser extensions. SIMD may be offered as an optional build only.
+The release implementation may require WASM SIMD128, but must not require WASM threads, shared memory, filesystem access, server calls, Python, or browser extensions.
 
 ## Security and privacy
 

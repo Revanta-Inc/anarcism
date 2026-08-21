@@ -2,7 +2,7 @@
 
 ## Reference and corpus
 
-The reference is ANARCI 2026.2.13.2 (`edcc29a08c40ac5acd49ce09f60a5ebfb7ccdd0c`) with HMMER 3.4 and `scheme="imgt"`. `tools/generate_golden.py` records the native output in `tests/golden/corpus.json`; ordinary tests consume that file and do not invoke Python or HMMER.
+The reference is ANARCI 2026.2.13.2 (`edcc29a08c40ac5acd49ce09f60a5ebfb7ccdd0c`) with HMMER 3.4 and `scheme="imgt"`. `tools/generate_golden.py` records native output in the checked-in fixtures; ordinary tests consume those files and do not invoke Python or HMMER.
 
 The 15-case corpus contains:
 
@@ -16,22 +16,26 @@ The 15-case corpus contains:
 - lysozyme as a negative control
 - valid and swapped VH/VL pair cases
 
+The expanded 1,397-case corpus adds published and germline VH/VL sequences, all bundled species, TCRs, systematic N/C truncations, CDR-length ladders, framework indels, edge thresholds, scFvs and four-domain constructs, long/ultralong CDR3s, constant domains, and negative proteins. Its full ANARCI output is stored as compact FNV-1a fingerprints in `corpus_v2_reference.json`; the unhashed chain, species, boundary, count, and score fields remain directly inspectable.
+
 Run the machine-readable report with:
 
 ```sh
-tools/build-browser.sh
-node tools/parity-report.mjs
+npm --prefix browser run build
+npm --prefix browser run parity
 ```
+
+The parity runner shards the expanded corpus across `os.availableParallelism()` worker threads. Set `PARITY_WORKERS=N` to override that count.
 
 Current result:
 
 | Measure | Result |
 |---|---:|
-| Cases | 15 |
-| Exact domain calls/class/species/boundaries/padded alignments | 15 / 15 |
-| Exact residue index/position/insertion-code tuples | 1,719 / 1,719 |
+| Cases | 1,412 |
+| Exact domain calls/class/species/boundaries/padded alignments | 1,414 / 1,414 |
+| Exact residue index/position/insertion-code tuples | 154,968 / 154,968 |
 | Pair outcomes | 2 / 2 |
-| Maximum absolute bit-score difference | 3.3592 bits |
+| Maximum absolute bit-score difference | 0.8449 bits |
 
 This is full numbering parity for the checked-in corpus, not merely chain-classification parity.
 
@@ -47,13 +51,13 @@ Public `start`/`end` are zero-based and half-open. ANARCI's numbered tuple expos
 
 ### Scores and E-values
 
-Forward/null1 is implemented, but null2 uses state occupancy from the deterministic Viterbi trace rather than HMMER's Forward/Backward posterior expectations. Strong single domains are usually within a fraction of a bit; the multidomain corpus currently reaches 3.3592 bits.
+Domain definition uses multihit Forward/Backward posterior regions, HMMER-compatible fixed-seed stochastic trace clustering for ambiguous regions, and unihit posterior decoding with null2 correction for isolated envelopes. Remaining score drift comes from 1/32768-nat profile quantization and scalar log-space arithmetic differing slightly from HMMER's optimized probability-space implementation.
 
-Because final scores are not exactly HMMER-equivalent, `eValue` is omitted rather than applying stored calibration to an approximate score. The profile format retains `tau` and `lambda` for a future posterior-null2 implementation.
+Because final scores are not bit-identical to HMMER, `eValue` is omitted rather than applying stored calibration to an approximate score. The profile format retains `tau` and `lambda` for deterministic significance ordering and future exact E-values.
 
 ### Profile acceleration
 
-The initial ungapped filter is used only to select profiles for expensive gapped scoring. It is not HMMER's optimized MSV filter. The retained count scales with requested alternatives and estimated domain count. This has exact profile ranking on the corpus, but a marginal exotic profile outside the retained set could be absent from alternatives. Raising `alternativeHitCount` causes more profiles to receive full scoring; 28 scores the entire inventory.
+The initial ungapped filter is used only to select profiles for expensive gapped scoring. It is not HMMER's optimized MSV filter. The retained count scales with requested alternatives and estimated domain count, with at least one reserve finalist. Viterbi trace scores remove that reserve per physical-domain cluster before posterior rescoring; the winner and every returned alternative still receive full Forward/Backward scoring. This has exact profile ranking on the corpus, but a marginal exotic profile outside the retained set could be absent. Raising `alternativeHitCount` expands both stages; 28 scores the entire inventory.
 
 ### Input validation
 
@@ -61,7 +65,7 @@ Only the 20 canonical amino acids are accepted. ANARCI can pass ambiguous symbol
 
 ### Terminal handling
 
-ANARCI's displayed alignments, numbered tuple, and HMMER `query_end` can disagree by one residue for unusual J records. This implementation defines its domain boundary from returned numbered residues. It reproduces corpus truncations and the pinned K/L/B terminal behavior rather than exposing conflicting fields.
+ANARCI's displayed alignments, numbered tuple, and HMMER `query_end` can disagree by one residue for unusual J records. This implementation defines its domain boundary from returned numbered residues. It reproduces ANARCI's terminal junction buffering, CDR padding, and permissive second J-region scan for long CDR3s rather than exposing conflicting fields.
 
 ## Germline parity
 
@@ -76,4 +80,12 @@ The V-assigned species constrains J assignment. If strict filters leave no eligi
 
 ## Adding cases
 
-Add a sequence and category to `tools/generate_golden.py`, regenerate with the exact locked Python environment and HMMER 3.4, inspect the JSON diff for molecular-data changes, then run both the Rust golden test and browser parity report. Do not regenerate reference data silently during ordinary CI.
+Add built-in cases to `tools/generate_golden.py`, or add `{id, seq, category, note}` records to `corpus_v2.json` and regenerate its compact reference with:
+
+```sh
+.venv/bin/python tools/generate_golden.py \
+  tests/golden/corpus_v2_reference.json \
+  --cases-file tests/golden/corpus_v2.json --compact
+```
+
+Use the exact locked Python environment and HMMER 3.4, inspect molecular-data diffs, then run both the Rust golden test and browser parity report. Reference data is never regenerated during ordinary CI.

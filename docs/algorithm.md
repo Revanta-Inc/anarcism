@@ -6,15 +6,17 @@ For each normalized input, the engine performs these bounded, deterministic stag
 
 1. Decode the embedded profile header and borrow score slices directly from the WASM data segment.
 2. Apply chain/species filters.
-3. Compute an ungapped local emission score for every eligible profile. Based on sequence length, retain enough profiles for the requested alternatives plus ordering slack. This is a size-focused filter, not an attempt to reproduce HMMER's byte/striped MSV implementation.
+3. Compute an ungapped local emission score for every eligible profile. Based on sequence length, retain enough profiles for the requested alternatives plus reserve candidates. This is a size-focused filter, not an attempt to reproduce HMMER's byte/striped MSV implementation.
 4. Run generic Plan7 local, multihit Viterbi on retained profiles. The DP includes M/I/D states and N/B/E/J/C special states and stores the full bounded matrix for deterministic traceback.
-5. Cluster paths that overlap at least half of the shorter domain. Keep one path per profile in each physical-domain cluster.
-6. Compute the HMMER-style local/multihit Forward score over each candidate domain envelope, subtract the length-dependent null1 score, and apply a deterministic trace-based null2 composition correction.
-7. Reject candidates below `minBitScore`, order remaining hits by score then profile name, and return physical domains in input order.
-8. Convert the winning M/I/D path to IMGT positions and regions. Framework deletions become `-` in the padded alignment. CDR residues are redistributed symmetrically around the IMGT center positions, matching ANARCI insertion ordering.
-9. If requested, project match states into a 128-character string and choose the highest-identity V germline across allowed species, then the highest-identity J germline from the V-assigned species. Ties keep source order, as pinned Python `max()` does.
+5. Cluster paths that overlap at least half of the shorter domain. Keep one path per profile in each physical-domain cluster, then use Viterbi trace scores to remove reserve profiles. The winner and every requested alternative continue to full scoring.
+6. Run multihit Forward/Backward decoding for each finalist to locate posterior regions. A simple region becomes one envelope. When the posterior supports multiple domains, draw 200 deterministic seeded stochastic traces, single-link their domain segments, choose supported endpoints, and compute the trace-ensemble null2 correction.
+7. Rescore each isolated envelope in local/unihit mode with full Forward and Backward matrices. Decode posterior state occupancy, compute expectation-based null2 composition bias where applicable, subtract null1, and apply HMMER's full-target outside-envelope length correction.
+8. Reject candidates below `minBitScore`, rank them by calibrated significance, and return physical domains in input order. A 0.01 multidomain significance uncertainty band uses raw domain score and then profile name as deterministic tie breaks.
+9. Build a posterior optimal-accuracy M/I/D display for the winning profile, then convert it to IMGT positions and regions. Framework deletions become `-` in the padded alignment. CDR residues are redistributed symmetrically around the IMGT center positions, matching ANARCI insertion ordering.
+10. For a single domain that ends before the J region while leaving a long suffix, perform ANARCI's permissive second profile scan after IMGT 104 and splice the recovered J trace around the reconstructed CDR3.
+11. If requested, project match states into a 128-character string and choose the highest-identity V germline across allowed species, then the highest-identity J germline from the V-assigned species. Ties keep source order, as pinned Python `max()` does.
 
-The baseline uses no WASM threads, filesystem, SIMD requirement, server, native executable, or runtime model fetch.
+The release build requires WASM SIMD128, but uses no WASM threads, shared memory, filesystem, server, native executable, or runtime model fetch.
 
 ## HMMER-compatible subset
 
@@ -25,19 +27,23 @@ Implemented:
 - configured local entry probabilities
 - multihit local N/B/E/J/C behavior
 - Viterbi traceback with multiple domains
-- Forward/null1 bit scoring
+- multihit Forward/Backward posterior region detection
+- fixed-seed stochastic traceback, segment clustering, and supported endpoint selection
+- unihit Forward/Backward posterior decoding
+- trace-ensemble and expectation-based null2 plus null1 bit scoring
+- HMMER's 0.001-nat table-driven floating-point logsum approximation
+- posterior optimal-accuracy alignment and traceback
 - stored Forward `tau`/`lambda` calibration values
 
 Not implemented:
 
 - HMMER file/database APIs at runtime
 - exact HMMER MSV or Viterbi filter thresholds
-- optimized SIMD stripes
-- posterior Backward decoding and posterior null2
+- HMMER's hand-striped SIMD matrix kernels (LLVM may vectorize suitable operations because the release enables `simd128`; the seeded traceback preserves optimized striped choice order)
 - accurate final E-values
 - complete HMMER diagnostics or domain-envelope reporting
 
-E-values are intentionally omitted. Applying `exp(-lambda * (score - tau))` to the approximate final score would produce a precise-looking but non-HMMER-equivalent number.
+E-values are intentionally omitted. Scalar log-space arithmetic and fixed-point profile scores are not bit-identical to HMMER's optimized probability-space pipeline, and calibration parameters alone do not reproduce its complete final E-value accounting.
 
 ## IMGT mapping
 
@@ -47,12 +53,12 @@ Match state `k` maps initially to IMGT position `k`. Insert and delete states ar
 - CDR2 uses positions 56–65 with nominal length 10.
 - CDR3 uses positions 105–117 with nominal length 13.
 - Short CDRs place residues from alternating left/right ends.
-- Long CDRs add insertion codes around the central anchors using ANARCI's symmetric order; insertion codes continue `A…Z, AA…` without an unbounded table.
-- A J-less isolated truncation after the conserved position-104 cysteine uses ANARCI-compatible short-tail handling.
+- Long CDRs add insertion codes around the central anchors using ANARCI's symmetric order; insertion codes continue `A…Z, AA, BB…`.
+- A J-less isolated truncation after the conserved position-104 cysteine uses ANARCI's low-threshold J recovery and short-tail behavior.
 
 `NumberedResidue.sequenceIndex` always refers to the normalized input. `start` is the minimum numbered index and `end` is one past the maximum.
 
-## `ANRCPRF1`
+## `ANRCPRF2`
 
 The profile generator parses HMMER3/f text at build time and validates a 20-residue alphabet and 128 match states. The little-endian asset contains:
 
@@ -64,7 +70,7 @@ The profile generator parses HMMER3/f text at build time and validates a 20-resi
 - 128 × 20 quantized match log-odds scores
 - 127 × 7 quantized transition log-probabilities
 
-Impossible scores reserve `i16::MIN`; finite values use 1/1024-natural-log quantization. Parsing validates dimensions, UTF-8, calibration values, chain/receptor consistency, truncation, invalid codes, and trailing bytes.
+Each score occupies three little-endian bytes. Impossible scores reserve signed 24-bit value `-2^23`; finite values use 1/32768-natural-log quantization. Parsing validates dimensions, UTF-8, calibration values, chain/receptor consistency, truncation, invalid codes, and trailing bytes.
 
 ## `ANRCGER1`
 
@@ -74,6 +80,6 @@ The model database borrows embedded byte slices; it does not inflate a second fl
 
 ## Determinism and complexity
 
-Tie breaks use profile name after score and preserve germline source order. There is no randomized algorithm or hash-map iteration in public results.
+Tie breaks use profile-name order after score and preserve germline source order. Stochastic domain definition uses HMMER's fixed seed of 42; no system entropy or hash-map iteration affects public results.
 
-For selected profiles, time is `O(P × L × 128)` and the largest Viterbi allocation for one profile is `O(L × 128 × 3)`, with `L ≤ 10,000`. Forward uses two DP rows. All user-controlled collection sizes are checked before allocation.
+For selected profiles, time is `O(P × L × 128)`. Viterbi, Forward/Backward posterior decoding, and optimal-accuracy alignment use bounded `O(L × 128 × 3)` matrices, with at most two full matrices live in a stage and `L ≤ 10,000`. All user-controlled collection sizes are checked before allocation.

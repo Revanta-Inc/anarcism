@@ -18,8 +18,8 @@ The proof of concept showed that a full HMMER pipeline was unnecessary:
 - A cheap ungapped local filter is useful for profile ordering, but byte-accurate HMMER MSV output is not a public requirement.
 - Generic Plan7 Viterbi with traceback is required for boundaries and numbering.
 - Forward is required for close bit-score parity.
-- HMMER's full acceleration pipeline, sequence database layer, file parsers, SIMD code, threading, and C/Easel runtime are not required.
-- Calibration parameters alone are insufficient for accurate E-values because the final score also requires posterior null2 composition correction. The public optional field therefore remains absent.
+- HMMER's full acceleration pipeline, sequence database layer, file parsers, hand-striped SIMD kernels, threading, and C/Easel runtime are not required. The release enables WASM SIMD128 for LLVM-vectorizable operations.
+- Posterior domain definition and null2 are implemented, but fixed-point scores and scalar arithmetic still prevent bit-identical optimized-HMMER results, and complete final E-value accounting remains outside the supported subset. The public optional field therefore remains absent.
 
 ## Inventory and initial budget
 
@@ -35,13 +35,13 @@ The byte-level gate allocated the 500,000-byte compressed ceiling as follows:
 
 | Component | Gate budget (Brotli) | Actual standalone Brotli |
 |---|---:|---:|
-| Quantized profiles | 120,000 | 90,376 |
+| Quantized profiles | 120,000 | 132,231 |
 | Packed germlines | 50,000 | 36,195 |
-| Rust engine + JSON ABI | 250,000 | Not independently additive; WASM including both assets is 202,560 |
+| Rust engine + JSON ABI | 250,000 | Not independently additive; WASM including both assets is 256,105 |
 | JavaScript, declarations, package metadata/notices | 30,000 | Under 6,000 |
-| Contingency | 50,000 | More than 290,000 remains against the final package |
+| Contingency | 50,000 | More than 240,000 remains against the final package |
 
-The compact profile file is 211,988 bytes raw. It removes insert emissions whose configured protein log-odds score is zero, shares the alphabet, precomputes local entries, and quantizes all retained scores to signed 16-bit values at 1/1024 natural-log units. The germline file is 226,705 bytes raw and encodes 128 aligned symbols with five bits each.
+The compact profile file is 315,721 bytes raw. It removes insert emissions whose configured protein log-odds score is zero, shares the alphabet, precomputes local entries, and quantizes retained scores to signed 24-bit values at 1/32768 natural-log units. The germline file is 226,705 bytes raw and encodes 128 aligned symbols with five bits each.
 
 ## Proof-of-concept result
 
@@ -62,4 +62,4 @@ This is an engineering audit, not legal advice. It establishes a documented redi
 
 ## Gate decision
 
-Proceed. The implemented, notice-inclusive distribution is roughly 41% of the 500,000-byte Brotli ceiling and 49% of the gzip ceiling. No reduced-scope tier is needed.
+Proceed. The implemented, notice-inclusive distribution is roughly 52% of the 500,000-byte Brotli ceiling and 61% of the gzip ceiling. No reduced-scope tier is needed.

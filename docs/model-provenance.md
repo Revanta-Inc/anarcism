@@ -28,7 +28,7 @@ All profiles have 128 HMM match states. ANARCI terminal numbering can end at 127
 3. Convert match negative-log probabilities to log odds using HMMER's protein background.
 4. Precompute HMMER local-entry values from occupancy.
 5. Omit protein insert emissions, whose configured log-odds values are zero.
-6. Quantize retained scores at 1/1024 natural-log units and emit `ANRCPRF1`.
+6. Quantize retained scores at 1/32768 natural-log units in signed 24-bit fields and emit `ANRCPRF2`.
 
 ### Germlines
 
@@ -39,7 +39,7 @@ All profiles have 128 HMM match states. ANARCI terminal numbering can end at 127
 
 The two output hashes are:
 
-- `profiles.bin`: `41955706ca6f5c1e2e1e524f8a4c1dfc0d397727e55f087daf088e6ef96ab0d3`
+- `profiles.bin`: `385ffd02779d776b414250d72c53cff6b96c6c5001a0cfad3d0fda0c1f9dbc83`
 - `germlines.bin`: `2498aac3bc732ec5abab31768c38854e9d6a1a8d127aa0821454fe19ccfd9d7e`
 
 ## License findings
