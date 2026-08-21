@@ -2,7 +2,7 @@
 
 `anarcism` is a browser-native Rust/WebAssembly implementation of the ANARCI behavior needed to recognize and IMGT-number immunoglobulin and T-cell-receptor variable domains. It runs locally, bundles every H/K/L/A/B/G/D profile in ANARCI 2026.2.13.2, supports multiple domains and optional V/J assignment, and makes no runtime network request for models or sequence analysis.
 
-The complete counted browser package is 308,064 bytes with gzip and 260,884 bytes with Brotli, below the 500,000-byte limits. See [size and performance measurements](docs/benchmarks.md) for the exact reproducible report.
+The complete counted browser package is 314,492 bytes with gzip and 265,996 bytes with Brotli, below the 500,000-byte limits. See [size and performance measurements](docs/benchmarks.md) for the exact reproducible report.
 
 ## Browser use
 
@@ -49,7 +49,20 @@ const pair = validateAntibodyPair(vh, vl, { startMax: 10, endMin: 100 });
 
 Errors are thrown as `AnarcismError` with `code`, `message`, and optional `inputId` fields. TypeScript declarations are included in the package.
 
-Native Rust callers can opt into multicore batches with `number_sequences_parallel(inputs, options, worker_count)`. The explicit `NonZeroUsize` worker count avoids oversubscribing applications that already manage their own thread pools. Results remain in input order; the browser API stays single-threaded and requires no WASM threads or shared memory.
+For lower browser batch latency, the optional asynchronous worker-pool entry point creates one independently initialized WASM engine per worker. It balances records by sequence length and restores input order before resolving:
+
+```js
+import { AnarcismWorkerPool } from "@revanta/anarcism/worker-pool";
+
+const pool = new AnarcismWorkerPool();
+await pool.initialize(4);
+const batch = await pool.numberSequences(inputs, { minBitScore: 80 });
+await pool.resize(8);
+const fastaResults = await pool.numberFasta(fasta);
+pool.terminate();
+```
+
+The synchronous browser API remains single-threaded and requires no WASM threads or shared memory. Native Rust callers can opt into multicore batches with `number_sequences_parallel(inputs, options, worker_count)`. Both parallel APIs take an explicit worker count to avoid oversubscribing applications that already manage parallel work, and both preserve input order.
 
 ## Output conventions
 
@@ -105,7 +118,7 @@ npm run benchmark:compare
 
 The comparison benchmark requires `uv sync --locked --no-install-project --no-default-groups --group reference` and HMMER 3.4 on `PATH`; ordinary Rust and browser builds do not.
 
-Run `node tools/serve-demo.mjs` from the repository root and open <http://127.0.0.1:8080/> for the demo. Analysis runs in a dedicated module Web Worker so synchronous WASM calls do not block the page.
+Run `node tools/serve-demo.mjs` from the repository root and open <http://127.0.0.1:8080/> for the demo. Analysis runs in a configurable pool of module Web Workers so synchronous WASM calls do not block the page. The demo starts one worker for low single-sequence latency, lazily grows the pool for FASTA batches, balances records across those workers, and returns results in input order.
 
 Further documentation:
 

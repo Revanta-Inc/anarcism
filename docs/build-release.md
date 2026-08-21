@@ -93,22 +93,38 @@ npm pack --dry-run
 npm pack
 ```
 
-Confirm that the tarball contains `dist/anarcism.wasm`, `dist/index.js`, `dist/index.d.ts`, and `dist/THIRD_PARTY_NOTICES.md`. The npm package is marked `UNLICENSED` because the repository owner has not selected a project license; upstream notices do not license original project code.
+Confirm that the tarball contains `dist/anarcism.wasm`, `dist/index.js`, `dist/index.d.ts`, `dist/worker-pool.js`, `dist/worker-pool.d.ts`, `dist/worker.js`, and `dist/THIRD_PARTY_NOTICES.md`. The npm package is marked `UNLICENSED` because the repository owner has not selected a project license; upstream notices do not license original project code.
 
 ### Python wheels
 
 The root `pyproject.toml` builds the `anarcism` wheel from the `crates/anarcism-python` bindings crate. The build is driven from the repository root because the sdist has to carry the whole Cargo workspace.
 
 ```sh
-uvx maturin build --release   # honors [tool.maturin] profile = "python"
+uvx maturin build   # profile comes from pyproject.toml
 uvx maturin sdist
 ```
+
+Do not pass `--release`. It overrides `[tool.maturin] profile` and silently builds the size-optimized, `panic = "abort"` browser profile instead, which is the one configuration a wheel must not ship. Check the build log for ``Finished `python` profile``.
 
 Three settings are load-bearing and are verified by the release checklist rather than by a test:
 
 - `profile = "python"` selects `[profile.python]` from the workspace `Cargo.toml`. The shipping `[profile.release]` sets `panic = "abort"` for the browser byte budget, and under that profile any Rust panic aborts the host interpreter with `SIGABRT` instead of raising. `[profile.python]` overrides `panic = "unwind"` so PyO3 converts a panic into `PanicException`, and restores `opt-level = 3` because a wheel has no size budget.
-- `include` names `assets/**/*`, `rust-toolchain.toml`, and `THIRD_PARTY_NOTICES.md` for the sdist. `cargo package --list` only reports files inside the selected crate, so without these entries the sdist builds a wheel that fails on the `include_bytes!` of `assets/profiles.bin`.
+- `include` names `assets/**/*` and `THIRD_PARTY_NOTICES.md` for the sdist. `cargo package --list` only reports files inside the selected crate, so without these entries the sdist builds a wheel that fails on the `include_bytes!` of `assets/profiles.bin`.
 - abi3 produces one wheel per platform covering every supported CPython, rather than one per interpreter version. abi3 does not cover free-threaded builds; those need their own non-abi3 wheels.
+- The `pyo3/generate-import-lib` feature is required, not optional. Windows cannot leave symbols undefined in a DLL, so the build needs a `python3.lib` to link against; that feature synthesizes one. Without it a Windows build demands a local interpreter and cannot be cross compiled at all.
+
+CI builds five wheels, and only macOS still needs its own runner. The Windows wheel is cross compiled from Linux with cargo-xwin, and macOS builds both architectures into one `universal2` wheel on a single arm64 runner. Cross compiling locally needs LLVM's `llvm-dlltool`, `lld-link`, and `clang-cl` on `PATH`:
+
+```sh
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin --locked
+PATH="$(brew --prefix llvm)/bin:$PATH" uvx maturin build --target x86_64-pc-windows-msvc
+
+rustup target add x86_64-apple-darwin
+uvx maturin build --target universal2-apple-darwin
+```
+
+A cross compiled wheel cannot be executed on the machine that built it, so the Windows and musllinux rows are build-only. Every other row installs its own wheel and runs the full suite, including the golden corpus, against the artifact it just produced.
 
 Verify the sdist in a clean environment, since a wheel built in the source tree can succeed while the sdist cannot:
 

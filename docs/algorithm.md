@@ -4,7 +4,7 @@
 
 For each normalized input, the engine performs these bounded, deterministic stages:
 
-1. Decode the embedded profile header and borrow score slices directly from the WASM data segment.
+1. Decode the embedded profile database on first use, expanding its packed 24-bit scores into cached `f32` arrays.
 2. Apply chain/species filters.
 3. Compute an ungapped local emission score for every eligible profile. Based on sequence length, retain enough profiles for the requested alternatives plus reserve candidates. This is a size-focused filter, not an attempt to reproduce HMMER's byte/striped MSV implementation.
 4. Run generic Plan7 local, multihit Viterbi on retained profiles. The DP includes M/I/D states and N/B/E/J/C special states and stores the full bounded matrix for deterministic traceback.
@@ -76,10 +76,12 @@ Each score occupies three little-endian bytes. Impossible scores reserve signed 
 
 The germline asset contains an ordered species table followed by V/J records. Each record stores segment, chain, species index, gene name, and exactly 80 bytes for a 128-symbol five-bit alignment over `-ACDEFGHIKLMNPQRSTVWY`. Parsing validates all dimensions, indices, symbols, truncation, and trailing bytes.
 
-The model database borrows embedded byte slices; it does not inflate a second floating-point copy of all profiles. Individual scores are decoded to `f32` on access.
+The model database continues to borrow strings and consensus sequences from the embedded bytes, but expands all score tables once and caches them for the process lifetime. The 29 bundled profiles require 414,932 bytes (about 405 KiB) for this floating-point copy. The shipped asset remains packed and unchanged; the runtime memory trades away repeated signed-24-bit decoding in every DP cell.
 
 ## Determinism and complexity
 
 Tie breaks use profile-name order after score and preserve germline source order. Stochastic domain definition uses HMMER's fixed seed of 42; no system entropy or hash-map iteration affects public results.
+
+Forward/Backward fills use safe fixed-stride views over three-float DP states and the 20-emission/seven-transition profile rows. This changes neither the packed asset nor recurrence order, but lets WASM bounds and address calculations be shared across each row.
 
 For selected profiles, time is `O(P × L × 128)`. Viterbi, Forward/Backward posterior decoding, and optimal-accuracy alignment use bounded `O(L × 128 × 3)` matrices, with at most two full matrices live in a stage and `L ≤ 10,000`. All user-controlled collection sizes are checked before allocation.
