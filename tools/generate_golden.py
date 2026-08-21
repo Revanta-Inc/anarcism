@@ -24,6 +24,8 @@ VH = "EVQLQQSGAEVVRSGASVKLSCTASGFNIKDYYIHWVKQRPEKGLEWIGWIDPEIGDTEYVPKFQGKATMTADT
 VL = "DIVMTQSQKFMSTSVGDRVSITCKASQNVGTAVAWYQQKPGQSPKLMIYSASNRYTGVPDRFTGSGSGTDFTLTISNMQSEDLADYFCQQYSSYPLTFGAGTKLELKR"
 SCFV = "DIQMTQSPSSLSASVGDRVTITCRTSGNIHNYLTWYQQKPGKAPQLLIYNAKTLADGVPSRFSGSGSGTQFTLTISSLQPEDFANYYCQHFWSLPFTFGQGTKVEIKRTGGGGSGGGGSGGGGSGGGGSEVQLVESGGGLVQPGGSLRLSCAASGFDFSRYDMSWVRQAPGKRLEWVAYISSGGGSTYFPDTVKGRFTISRDNAKNTLYLQMNSLRAEDTAVYYCARQNKKLTWFDYWGQGTLVTVSSHHHHHH"
 LYSOZYME = "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL"
+FNV_OFFSET = 0xCBF29CE484222325
+FNV_PRIME = 0x100000001B3
 
 
 def synthetic_domain(chain: str, species: str) -> str:
@@ -135,14 +137,62 @@ def reference_domains(
     return domains
 
 
+def fnv1a(value: str) -> str:
+    result = FNV_OFFSET
+    for byte in value.encode("utf-8"):
+        result ^= byte
+        result = (result * FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return f"{result:016x}"
+
+
+def compact_domain(domain: dict[str, Any]) -> dict[str, Any]:
+    numbering = "".join(
+        f'{residue["sequenceIndex"]}|{residue["aminoAcid"]}|'
+        f'{residue["position"]}|{residue["insertionCode"]}\n'
+        for residue in domain["numbering"]
+    )
+    return {
+        "chainType": domain["chainType"],
+        "species": domain["species"],
+        "start": domain["start"],
+        "end": domain["end"],
+        "bitScore": domain["bitScore"],
+        "numberingLength": len(domain["numbering"]),
+        "numberingFnv1a64": fnv1a(numbering),
+        "paddedAlignmentFnv1a64": fnv1a(domain["paddedImgtAlignment"]),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--cases-file",
+        type=Path,
+        help="JSON array of {id, seq, category, note} cases instead of the built-in corpus",
+    )
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="store hashes of alignments/numbering instead of the full reference vectors",
+    )
     args = parser.parse_args()
     if version("anarci") != PINNED_ANARCI:
         raise SystemExit(f"this generator requires ANARCI {PINNED_ANARCI}")
 
-    corpus_cases = cases()
+    if args.cases_file:
+        raw_cases = json.loads(args.cases_file.read_text(encoding="utf-8"))
+        corpus_cases = [
+            {
+                "id": case["id"],
+                "sequence": case["seq"],
+                "category": case["category"],
+                "note": case.get("note", ""),
+            }
+            for case in raw_cases
+        ]
+    else:
+        corpus_cases = cases()
     numbered, details, _ = anarci(
         [(case["id"], case["sequence"]) for case in corpus_cases],
         scheme="imgt",
@@ -156,20 +206,37 @@ def main() -> None:
     hmmer_banner = subprocess.run(
         ["hmmscan", "-h"], check=True, capture_output=True, text=True
     ).stdout.splitlines()[1].strip()
-    document = {
-        "reference": {
-            "anarciVersion": PINNED_ANARCI,
-            "anarciCommit": ANARCI_COMMIT,
-            "hmmer": hmmer_banner,
-            "scheme": "imgt",
-            "coordinates": "zero-based half-open numbered start/(inclusive end + 1)",
-        },
-        "cases": corpus_cases,
-        "pairs": [
-            {"id": "valid", "vh": VH, "vl": VL, "ok": True},
-            {"id": "swapped", "vh": VL, "vl": VH, "ok": False},
-        ],
+    reference = {
+        "anarciVersion": PINNED_ANARCI,
+        "anarciCommit": ANARCI_COMMIT,
+        "hmmer": hmmer_banner,
+        "scheme": "imgt",
+        "coordinates": "zero-based half-open numbered start/(inclusive end + 1)",
     }
+    if args.compact:
+        document = {
+            "reference": reference,
+            "hash": "FNV-1a 64 over canonical UTF-8 fields",
+            "cases": [
+                {
+                    "id": case["id"],
+                    "category": case["category"],
+                    "domains": [
+                        compact_domain(domain) for domain in case["referenceDomains"]
+                    ],
+                }
+                for case in corpus_cases
+            ],
+        }
+    else:
+        document = {
+            "reference": reference,
+            "cases": corpus_cases,
+            "pairs": [
+                {"id": "valid", "vh": VH, "vl": VL, "ok": True},
+                {"id": "swapped", "vh": VL, "vl": VH, "ok": False},
+            ],
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {len(corpus_cases)} golden cases to {args.output}")
