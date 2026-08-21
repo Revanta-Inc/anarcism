@@ -1,0 +1,22 @@
+const VH =
+  "EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS";
+const VL =
+  "DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK";
+const LINKER = "GGGGSGGGGSGGGGS";
+const LYSOZYME =
+  "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL";
+const SCFV = VH + LINKER + VL;
+
+export const DEFAULT_SEQUENCE = VH;
+
+export const EXAMPLES: ReadonlyArray<{ label: string; sequence: string }> = [
+  { label: "Trastuzumab VH", sequence: VH },
+  { label: "Trastuzumab VL", sequence: VL },
+  { label: "scFv (VH-linker-VL)", sequence: SCFV },
+  {
+    label: "FASTA (all three)",
+    sequence:
+      `>trastuzumab_vh\n${VH}\n>trastuzumab_vl\n${VL}\n>trastuzumab_scfv\n${SCFV}\n`,
+  },
+  { label: "Lysozyme (negative)", sequence: LYSOZYME },
+];
