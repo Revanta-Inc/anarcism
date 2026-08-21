@@ -21,6 +21,7 @@
     "test:types": "tsc --noEmit",
     "benchmark": "node bench/benchmark.mjs",
     "benchmark:browser": "node bench/browser-benchmark.mjs",
+    "benchmark:compare": "node ../tools/benchmark-comparison.mjs",
     "parity": "node ../tools/parity-report.mjs",
     "size": "node ../tools/size-report.mjs"
   },
