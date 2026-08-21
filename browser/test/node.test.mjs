@@ -21,7 +21,20 @@ test.before(async () => {
 });
 
 test("synchronous initialization accepts bytes and compiled modules", () => {
-  assert.equal(initSync(wasm).numberSequence(VH).domains[0].chainType, "H");
+  const bytesApi = initSync(wasm);
+  assert.equal(bytesApi.version, "0.1.0");
+  assert.deepEqual(bytesApi.chains(), ["H", "K", "L", "A", "B", "G", "D"]);
+  assert.deepEqual(bytesApi.species(), [
+    "human",
+    "mouse",
+    "rat",
+    "rabbit",
+    "rhesus",
+    "pig",
+    "alpaca",
+    "cow",
+  ]);
+  assert.equal(bytesApi.numberSequence(VH).domains[0].chainType, "H");
   const module = new WebAssembly.Module(wasm);
   assert.equal(initSync(module).numberSequence(VL).domains[0].chainType, "K");
 });

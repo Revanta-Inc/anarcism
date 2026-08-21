@@ -69,6 +69,9 @@ export interface PairValidationResult {
 }
 
 export interface AnarcismApi {
+  readonly version: string;
+  chains(): ChainType[];
+  species(): string[];
   numberSequence(sequence: string, options?: NumberingOptions): SequenceResult;
   numberSequences(
     inputs: Array<{ id: string; sequence: string }>,

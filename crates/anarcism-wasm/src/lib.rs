@@ -4,8 +4,8 @@
 //! safe browser wrapper is the public interface; the raw exports are internal.
 
 use anarcism_core::{
-    Error, NumberingOptions, PairValidationOptions, SequenceInput, number_fasta, number_sequence,
-    number_sequences, validate_antibody_pair,
+    ChainType, Error, NumberingOptions, PairValidationOptions, SequenceInput, embedded_profiles,
+    number_fasta, number_sequence, number_sequences, validate_antibody_pair,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,7 @@ const MAX_REQUEST_BYTES: usize = 12 * 1024 * 1024;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "method", rename_all = "camelCase")]
 enum Request {
+    Metadata,
     NumberSequence {
         sequence: String,
         #[serde(default)]
@@ -36,6 +37,14 @@ enum Request {
         #[serde(default)]
         options: PairValidationOptions,
     },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleMetadata {
+    version: &'static str,
+    chains: Vec<ChainType>,
+    species: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -83,6 +92,7 @@ pub fn handle_request(bytes: &[u8]) -> Vec<u8> {
     };
 
     match request {
+        Request::Metadata => encode_result(module_metadata()),
         Request::NumberSequence { sequence, options } => {
             encode_result(number_sequence(&sequence, &options))
         }
@@ -94,6 +104,25 @@ pub fn handle_request(bytes: &[u8]) -> Vec<u8> {
             encode_result(validate_antibody_pair(&vh, &vl, &options))
         }
     }
+}
+
+fn module_metadata() -> Result<ModuleMetadata, Error> {
+    let database = embedded_profiles()?;
+    let mut chains = Vec::new();
+    let mut species = Vec::new();
+    for profile in database.profiles() {
+        if !chains.contains(&profile.chain_type()) {
+            chains.push(profile.chain_type());
+        }
+        if !species.iter().any(|value| value == profile.species()) {
+            species.push(profile.species().to_owned());
+        }
+    }
+    Ok(ModuleMetadata {
+        version: env!("CARGO_PKG_VERSION"),
+        chains,
+        species,
+    })
 }
 
 fn encode_result<T: Serialize>(result: Result<T, Error>) -> Vec<u8> {
@@ -193,6 +222,25 @@ mod tests {
             serde_json::from_slice(&handle_request(b"not json")).expect("bridge error is JSON");
         assert_eq!(failure["ok"], false);
         assert_eq!(failure["error"]["code"], "INVALID_REQUEST");
+    }
+
+    #[test]
+    fn metadata_comes_from_the_embedded_profile_inventory() {
+        let response: serde_json::Value =
+            serde_json::from_slice(&handle_request(br#"{"method":"metadata"}"#))
+                .expect("bridge response is JSON");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["value"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            response["value"]["chains"],
+            serde_json::json!(["H", "K", "L", "A", "B", "G", "D"])
+        );
+        assert_eq!(
+            response["value"]["species"],
+            serde_json::json!([
+                "human", "mouse", "rat", "rabbit", "rhesus", "pig", "alpaca", "cow"
+            ])
+        );
     }
 
     #[test]

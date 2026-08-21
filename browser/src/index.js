@@ -1,6 +1,7 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 let wasm;
+let moduleMetadata;
 
 export class AnarcismError extends Error {
   constructor(error) {
@@ -23,6 +24,13 @@ function useInstance(instance) {
     throw new TypeError("incompatible anarcism WebAssembly module");
   }
   wasm = exports;
+  try {
+    moduleMetadata = invoke({ method: "metadata" });
+  } catch (error) {
+    wasm = undefined;
+    moduleMetadata = undefined;
+    throw error;
+  }
   return api;
 }
 
@@ -118,7 +126,20 @@ export function validateAntibodyPair(vh, vl, options = {}) {
   return invoke({ method: "validateAntibodyPair", vh, vl, options });
 }
 
+function chains() {
+  return [...moduleMetadata.chains];
+}
+
+function species() {
+  return [...moduleMetadata.species];
+}
+
 const api = Object.freeze({
+  get version() {
+    return moduleMetadata.version;
+  },
+  chains,
+  species,
   numberSequence,
   numberSequences,
   numberFasta,

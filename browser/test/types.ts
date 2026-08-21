@@ -18,6 +18,12 @@ const options = {
 
 const apiPromise: Promise<AnarcismApi> = init(new Uint8Array());
 void apiPromise;
+apiPromise.then((api) => {
+  const version: string = api.version;
+  const chains: ChainType[] = api.chains();
+  const species: string[] = api.species();
+  void [version, chains, species];
+});
 const single = numberSequence("ACDEFGHIK", options);
 const chain: ChainType | undefined = single.domains[0]?.chainType;
 void chain;

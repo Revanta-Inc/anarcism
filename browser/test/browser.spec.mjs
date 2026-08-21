@@ -35,3 +35,27 @@ test("numbers a VH/VL pair without network sequence transfer", async ({ page }) 
   ]));
   expect(requests.some((url) => url.includes(VH.slice(0, 16)))).toBe(false);
 });
+
+test("demo initializes and renders an IMGT-numbered domain", async ({ page }) => {
+  await page.goto("/demo/");
+
+  await expect(page.locator("#run")).toBeEnabled({ timeout: 30_000 });
+  expect(page.workers().map((worker) => worker.url())).toEqual([
+    "http://127.0.0.1:43991/demo/worker.js",
+  ]);
+  await expect(page.locator("#ver")).toHaveText("0.1.0");
+  await expect(page.locator("#chains input")).toHaveCount(7);
+  await expect(page.locator("#species option")).toHaveCount(8);
+
+  await page.locator("#run").click();
+  await expect(page.locator(".badge.chain")).toHaveText("H");
+  await expect(page.locator(".res .p").first()).toHaveText("1");
+  await expect(page.locator("details")).toHaveCount(0);
+
+  await page.locator("#alts").check();
+  await page.locator("#run").click();
+  await expect(page.locator("details summary")).toHaveText("3 alternative hits");
+
+  await page.locator('[data-ex="lys"]').click();
+  await expect(page.locator("#out .none")).toHaveText("No variable domain detected.");
+});

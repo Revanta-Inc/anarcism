@@ -4,10 +4,15 @@ import { createServer } from "node:http";
 import { extname, resolve } from "node:path";
 
 const browserRoot = resolve(import.meta.dirname, "..");
+const repositoryRoot = resolve(browserRoot, "..");
 const routes = new Map([
   ["/", resolve(import.meta.dirname, "fixture.html")],
   ["/index.js", resolve(browserRoot, "dist/index.js")],
   ["/anarcism.wasm", resolve(browserRoot, "dist/anarcism.wasm")],
+  ["/demo/", resolve(repositoryRoot, "demo/index.html")],
+  ["/demo/worker.js", resolve(repositoryRoot, "demo/worker.js")],
+  ["/browser/dist/index.js", resolve(browserRoot, "dist/index.js")],
+  ["/browser/dist/anarcism.wasm", resolve(browserRoot, "dist/anarcism.wasm")],
 ]);
 const contentTypes = new Map([
   [".html", "text/html; charset=utf-8"],
