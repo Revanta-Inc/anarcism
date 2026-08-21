@@ -10,6 +10,7 @@ cargo build --locked --release --target wasm32-unknown-unknown -p anarcism-wasm
 mkdir -p "$distribution"
 if command -v wasm-opt >/dev/null 2>&1; then
   wasm-opt -Oz --strip-debug \
+    --enable-simd \
     --enable-sign-ext \
     --enable-nontrapping-float-to-int \
     --enable-bulk-memory \
