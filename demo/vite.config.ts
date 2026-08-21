@@ -6,7 +6,7 @@ import { defineConfig } from "vite";
 // The demo consumes the built package, exactly as an npm dependent would.
 // `tools/build-browser.sh` has to run before `vite build`.
 const distribution = fileURLToPath(new URL("../browser/dist", import.meta.url));
-const root = fileURLToPath(new URL(".", import.meta.url));
+const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 
 export default defineConfig({
   // Relative URLs keep one build working at any GitHub Pages path, so the
@@ -17,8 +17,9 @@ export default defineConfig({
     alias: { "@anarcism": distribution },
   },
   server: {
-    // `browser/dist` sits outside the Vite root.
-    fs: { allow: [root, distribution] },
+    // Both `browser/dist` and the workspace-hoisted `node_modules` sit outside
+    // the Vite root.
+    fs: { allow: [repositoryRoot] },
   },
   build: {
     target: "es2022",

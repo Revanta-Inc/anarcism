@@ -3,7 +3,9 @@
 <title>anarcism browser test</title>
 <script type="module">
   import init, * as api from "/index.js";
+  import * as workerPool from "/worker-pool.js";
   globalThis.anarcismApi = api;
+  globalThis.anarcismWorkerPool = workerPool;
   globalThis.anarcismStage = "initializing";
   const initializationStarted = performance.now();
   globalThis.anarcismReady = init("/anarcism.wasm").then(

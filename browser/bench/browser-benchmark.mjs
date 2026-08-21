@@ -65,7 +65,7 @@ try {
     const batchMs = performance.now() - started;
     assertBatch(batch, inputs.length);
 
-    const { AnarcismWorkerPool } = await import("/browser/dist/worker-pool.js");
+    const { AnarcismWorkerPool } = await import("/worker-pool.js");
     const pool = new AnarcismWorkerPool();
     let workerPool;
     try {
