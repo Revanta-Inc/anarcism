@@ -1023,6 +1023,7 @@ impl ForwardMatrix {
     ) -> Self {
         let model_length = profile.consensus().len();
         let sequence_length = sequence.len();
+        let logsum = Logsum::shared();
         let row_width = (model_length + 1) * STATE_COUNT;
         let mut cells = vec![f32::NEG_INFINITY; (sequence_length + 1) * row_width];
         let mut specials = vec![f32::NEG_INFINITY; (sequence_length + 1) * SPECIAL_COUNT];
@@ -1036,122 +1037,67 @@ impl ForwardMatrix {
         set_special(&mut specials, 0, N, 0.0);
         set_special(&mut specials, 0, B, move_score);
 
+        let local_entry_scores = profile.local_entry_scores();
+        let match_score_rows = profile.match_score_rows();
+        let transition_score_rows = profile.transition_score_rows();
+        let state_row_width = model_length + 1;
+        let (state_cells, remainder) = cells.as_chunks_mut::<STATE_COUNT>();
+        debug_assert!(remainder.is_empty());
+
         for sequence_position in 1..=sequence_length {
+            let current_start = sequence_position * state_row_width;
+            let (completed_rows, current_and_later) = state_cells.split_at_mut(current_start);
+            let previous_row = &completed_rows[completed_rows.len() - state_row_width..];
+            let current_row = &mut current_and_later[..state_row_width];
             let residue = usize::from(sequence[sequence_position - 1]);
+            let begin_state_score = special(&specials, sequence_position - 1, B);
             let mut end_score = f32::NEG_INFINITY;
             for model_position in 1..=model_length {
-                let from_match = if model_position > 1 {
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position - 1,
-                        model_position - 1,
-                        MATCH,
-                    ) + profile.transition_score(model_position - 1, MM)
+                let (from_match, from_insert, from_delete) = if model_position > 1 {
+                    let previous_transitions = &transition_score_rows[model_position - 2];
+                    (
+                        previous_row[model_position - 1][MATCH] + previous_transitions[MM],
+                        previous_row[model_position - 1][INSERT] + previous_transitions[IM],
+                        previous_row[model_position - 1][DELETE] + previous_transitions[DM],
+                    )
                 } else {
-                    f32::NEG_INFINITY
+                    (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY)
                 };
-                let from_insert = if model_position > 1 {
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position - 1,
-                        model_position - 1,
-                        INSERT,
-                    ) + profile.transition_score(model_position - 1, IM)
-                } else {
-                    f32::NEG_INFINITY
-                };
-                let from_delete = if model_position > 1 {
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position - 1,
-                        model_position - 1,
-                        DELETE,
-                    ) + profile.transition_score(model_position - 1, DM)
-                } else {
-                    f32::NEG_INFINITY
-                };
-                let from_begin = special(&specials, sequence_position - 1, B)
-                    + profile.local_entry_score(model_position);
-                let match_score = logsum4(from_match, from_insert, from_begin, from_delete)
-                    + profile.match_score(model_position, residue);
-                set_matrix_cell(
-                    &mut cells,
-                    model_length,
-                    sequence_position,
-                    model_position,
-                    MATCH,
-                    match_score,
-                );
+                let from_begin = begin_state_score + local_entry_scores[model_position - 1];
+                let match_score = logsum.four(from_match, from_insert, from_begin, from_delete)
+                    + match_score_rows[model_position - 1][residue];
+                current_row[model_position][MATCH] = match_score;
 
                 let insert_score = if model_position < model_length {
-                    logsum(
-                        matrix_cell(
-                            &cells,
-                            model_length,
-                            sequence_position - 1,
-                            model_position,
-                            MATCH,
-                        ) + profile.transition_score(model_position, MI),
-                        matrix_cell(
-                            &cells,
-                            model_length,
-                            sequence_position - 1,
-                            model_position,
-                            INSERT,
-                        ) + profile.transition_score(model_position, II),
+                    let transitions = &transition_score_rows[model_position - 1];
+                    logsum.pair(
+                        previous_row[model_position][MATCH] + transitions[MI],
+                        previous_row[model_position][INSERT] + transitions[II],
                     )
                 } else {
                     f32::NEG_INFINITY
                 };
-                set_matrix_cell(
-                    &mut cells,
-                    model_length,
-                    sequence_position,
-                    model_position,
-                    INSERT,
-                    insert_score,
-                );
+                current_row[model_position][INSERT] = insert_score;
 
                 let delete_score = if model_position > 1 {
-                    logsum(
-                        matrix_cell(
-                            &cells,
-                            model_length,
-                            sequence_position,
-                            model_position - 1,
-                            MATCH,
-                        ) + profile.transition_score(model_position - 1, MD),
-                        matrix_cell(
-                            &cells,
-                            model_length,
-                            sequence_position,
-                            model_position - 1,
-                            DELETE,
-                        ) + profile.transition_score(model_position - 1, DD),
+                    let previous_transitions = &transition_score_rows[model_position - 2];
+                    logsum.pair(
+                        current_row[model_position - 1][MATCH] + previous_transitions[MD],
+                        current_row[model_position - 1][DELETE] + previous_transitions[DD],
                     )
                 } else {
                     f32::NEG_INFINITY
                 };
-                set_matrix_cell(
-                    &mut cells,
-                    model_length,
-                    sequence_position,
-                    model_position,
-                    DELETE,
-                    delete_score,
-                );
-                end_score = logsum3(end_score, match_score, delete_score);
+                current_row[model_position][DELETE] = delete_score;
+                end_score = logsum.three(end_score, match_score, delete_score);
             }
 
             set_special(&mut specials, sequence_position, E, end_score);
-            let join = logsum(
+            let join = logsum.pair(
                 special(&specials, sequence_position - 1, J) + loop_score,
                 end_score + end_loop_score,
             );
-            let suffix = logsum(
+            let suffix = logsum.pair(
                 special(&specials, sequence_position - 1, C) + loop_score,
                 end_score + end_move_score,
             );
@@ -1163,7 +1109,7 @@ impl ForwardMatrix {
                 &mut specials,
                 sequence_position,
                 B,
-                logsum(prefix + move_score, join + move_score),
+                logsum.pair(prefix + move_score, join + move_score),
             );
         }
 
@@ -1509,6 +1455,7 @@ impl BackwardMatrix {
     ) -> Self {
         let model_length = profile.consensus().len();
         let sequence_length = sequence.len();
+        let logsum = Logsum::shared();
         let row_width = (model_length + 1) * STATE_COUNT;
         let mut cells = vec![f32::NEG_INFINITY; (sequence_length + 1) * row_width];
         let mut specials = vec![f32::NEG_INFINITY; (sequence_length + 1) * SPECIAL_COUNT];
@@ -1523,196 +1470,99 @@ impl BackwardMatrix {
         set_special(&mut specials, sequence_length, C, move_score);
         let terminal_end = move_score + end_move_score;
         set_special(&mut specials, sequence_length, E, terminal_end);
-        set_matrix_cell(
-            &mut cells,
-            model_length,
-            sequence_length,
-            model_length,
-            MATCH,
-            terminal_end,
-        );
-        set_matrix_cell(
-            &mut cells,
-            model_length,
-            sequence_length,
-            model_length,
-            DELETE,
-            terminal_end,
-        );
+        let local_entry_scores = profile.local_entry_scores();
+        let match_score_rows = profile.match_score_rows();
+        let transition_score_rows = profile.transition_score_rows();
+        let state_row_width = model_length + 1;
+        let (state_cells, remainder) = cells.as_chunks_mut::<STATE_COUNT>();
+        debug_assert!(remainder.is_empty());
+
+        let terminal_start = sequence_length * state_row_width;
+        let terminal_row = &mut state_cells[terminal_start..terminal_start + state_row_width];
+        terminal_row[model_length][MATCH] = terminal_end;
+        terminal_row[model_length][DELETE] = terminal_end;
         for model_position in (1..model_length).rev() {
-            let match_score = logsum(
-                terminal_end,
-                matrix_cell(
-                    &cells,
-                    model_length,
-                    sequence_length,
-                    model_position + 1,
-                    DELETE,
-                ) + profile.transition_score(model_position, MD),
-            );
-            let delete_score = logsum(
-                terminal_end,
-                matrix_cell(
-                    &cells,
-                    model_length,
-                    sequence_length,
-                    model_position + 1,
-                    DELETE,
-                ) + profile.transition_score(model_position, DD),
-            );
-            set_matrix_cell(
-                &mut cells,
-                model_length,
-                sequence_length,
-                model_position,
-                MATCH,
-                match_score,
-            );
-            set_matrix_cell(
-                &mut cells,
-                model_length,
-                sequence_length,
-                model_position,
-                DELETE,
-                delete_score,
-            );
+            let transitions = &transition_score_rows[model_position - 1];
+            let next_delete = terminal_row[model_position + 1][DELETE];
+            let match_score = logsum.pair(terminal_end, next_delete + transitions[MD]);
+            let delete_score = logsum.pair(terminal_end, next_delete + transitions[DD]);
+            terminal_row[model_position][MATCH] = match_score;
+            terminal_row[model_position][DELETE] = delete_score;
         }
 
         for sequence_position in (1..sequence_length).rev() {
+            let next_start = (sequence_position + 1) * state_row_width;
+            let (through_current, next_and_later) = state_cells.split_at_mut(next_start);
+            let current_start = sequence_position * state_row_width;
+            let current_row = &mut through_current[current_start..current_start + state_row_width];
+            let next_row = &next_and_later[..state_row_width];
             let next_residue = usize::from(sequence[sequence_position]);
             let mut begin_score = f32::NEG_INFINITY;
             for model_position in 1..=model_length {
-                begin_score = logsum(
+                begin_score = logsum.pair(
                     begin_score,
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position + 1,
-                        model_position,
-                        MATCH,
-                    ) + profile.local_entry_score(model_position)
-                        + profile.match_score(model_position, next_residue),
+                    next_row[model_position][MATCH]
+                        + local_entry_scores[model_position - 1]
+                        + match_score_rows[model_position - 1][next_residue],
                 );
             }
             set_special(&mut specials, sequence_position, B, begin_score);
-            let join = logsum(
+            let join = logsum.pair(
                 special(&specials, sequence_position + 1, J) + loop_score,
                 begin_score + move_score,
             );
             set_special(&mut specials, sequence_position, J, join);
             let suffix = special(&specials, sequence_position + 1, C) + loop_score;
             set_special(&mut specials, sequence_position, C, suffix);
-            let end_score = logsum(join + end_loop_score, suffix + end_move_score);
+            let end_score = logsum.pair(join + end_loop_score, suffix + end_move_score);
             set_special(&mut specials, sequence_position, E, end_score);
-            let prefix = logsum(
+            let prefix = logsum.pair(
                 special(&specials, sequence_position + 1, N) + loop_score,
                 begin_score + move_score,
             );
             set_special(&mut specials, sequence_position, N, prefix);
 
-            set_matrix_cell(
-                &mut cells,
-                model_length,
-                sequence_position,
-                model_length,
-                MATCH,
-                end_score,
-            );
-            set_matrix_cell(
-                &mut cells,
-                model_length,
-                sequence_position,
-                model_length,
-                DELETE,
-                end_score,
-            );
+            current_row[model_length][MATCH] = end_score;
+            current_row[model_length][DELETE] = end_score;
             for model_position in (1..model_length).rev() {
-                let next_match = matrix_cell(
-                    &cells,
-                    model_length,
-                    sequence_position + 1,
-                    model_position + 1,
-                    MATCH,
-                ) + profile.match_score(model_position + 1, next_residue);
-                let match_score = logsum4(
-                    next_match + profile.transition_score(model_position, MM),
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position + 1,
-                        model_position,
-                        INSERT,
-                    ) + profile.transition_score(model_position, MI),
+                let transitions = &transition_score_rows[model_position - 1];
+                let next_match = next_row[model_position + 1][MATCH]
+                    + match_score_rows[model_position][next_residue];
+                let match_score = logsum.four(
+                    next_match + transitions[MM],
+                    next_row[model_position][INSERT] + transitions[MI],
                     end_score,
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position,
-                        model_position + 1,
-                        DELETE,
-                    ) + profile.transition_score(model_position, MD),
+                    current_row[model_position + 1][DELETE] + transitions[MD],
                 );
-                let insert_score = logsum(
-                    next_match + profile.transition_score(model_position, IM),
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position + 1,
-                        model_position,
-                        INSERT,
-                    ) + profile.transition_score(model_position, II),
+                let insert_score = logsum.pair(
+                    next_match + transitions[IM],
+                    next_row[model_position][INSERT] + transitions[II],
                 );
-                let delete_score = logsum3(
-                    next_match + profile.transition_score(model_position, DM),
-                    matrix_cell(
-                        &cells,
-                        model_length,
-                        sequence_position,
-                        model_position + 1,
-                        DELETE,
-                    ) + profile.transition_score(model_position, DD),
+                let delete_score = logsum.three(
+                    next_match + transitions[DM],
+                    current_row[model_position + 1][DELETE] + transitions[DD],
                     end_score,
                 );
-                set_matrix_cell(
-                    &mut cells,
-                    model_length,
-                    sequence_position,
-                    model_position,
-                    MATCH,
-                    match_score,
-                );
-                set_matrix_cell(
-                    &mut cells,
-                    model_length,
-                    sequence_position,
-                    model_position,
-                    INSERT,
-                    insert_score,
-                );
-                set_matrix_cell(
-                    &mut cells,
-                    model_length,
-                    sequence_position,
-                    model_position,
-                    DELETE,
-                    delete_score,
-                );
+                current_row[model_position][MATCH] = match_score;
+                current_row[model_position][INSERT] = insert_score;
+                current_row[model_position][DELETE] = delete_score;
             }
         }
 
         if sequence_length > 0 {
+            let first_row = &state_cells[state_row_width..state_row_width * 2];
             let first_residue = usize::from(sequence[0]);
             let mut begin_score = f32::NEG_INFINITY;
             for model_position in 1..=model_length {
-                begin_score = logsum(
+                begin_score = logsum.pair(
                     begin_score,
-                    matrix_cell(&cells, model_length, 1, model_position, MATCH)
-                        + profile.local_entry_score(model_position)
-                        + profile.match_score(model_position, first_residue),
+                    first_row[model_position][MATCH]
+                        + local_entry_scores[model_position - 1]
+                        + match_score_rows[model_position - 1][first_residue],
                 );
             }
             set_special(&mut specials, 0, B, begin_score);
-            let prefix = logsum(
+            let prefix = logsum.pair(
                 special(&specials, 1, N) + loop_score,
                 begin_score + move_score,
             );
@@ -2846,21 +2696,46 @@ fn max4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     a.max(b).max(c).max(d)
 }
 
+#[derive(Clone, Copy)]
+struct Logsum(&'static [f32]);
+
+impl Logsum {
+    #[inline]
+    fn shared() -> Self {
+        Self(logsum_lookup())
+    }
+
+    #[inline(always)]
+    fn pair(self, a: f32, b: f32) -> f32 {
+        // A right-hand -infinity produces an infinite difference and returns
+        // `a` through the cutoff below, so only the left sentinel needs an
+        // explicit branch. Profile scores and DP state never contain NaN.
+        if a == f32::NEG_INFINITY {
+            return b;
+        }
+        let maximum = a.max(b);
+        let difference = (a - b).abs();
+        if difference >= 15.7 {
+            maximum
+        } else {
+            maximum + self.0[(difference * LOGSUM_SCALE) as usize]
+        }
+    }
+
+    #[inline(always)]
+    fn three(self, a: f32, b: f32, c: f32) -> f32 {
+        self.pair(self.pair(a, b), c)
+    }
+
+    #[inline(always)]
+    fn four(self, a: f32, b: f32, c: f32, d: f32) -> f32 {
+        self.pair(self.pair(a, b), self.pair(c, d))
+    }
+}
+
 #[inline]
 fn logsum(a: f32, b: f32) -> f32 {
-    if a.is_infinite() && a.is_sign_negative() {
-        return b;
-    }
-    if b.is_infinite() && b.is_sign_negative() {
-        return a;
-    }
-    let maximum = a.max(b);
-    let difference = (a - b).abs();
-    if difference >= 15.7 {
-        maximum
-    } else {
-        maximum + logsum_lookup()[(difference * LOGSUM_SCALE) as usize]
-    }
+    Logsum::shared().pair(a, b)
 }
 
 #[inline]
@@ -2873,12 +2748,14 @@ fn logsum_lookup() -> &'static [f32] {
     })
 }
 
+#[cfg(test)]
 fn logsum3(a: f32, b: f32, c: f32) -> f32 {
-    logsum(logsum(a, b), c)
+    Logsum::shared().three(a, b, c)
 }
 
+#[cfg(test)]
 fn logsum4(a: f32, b: f32, c: f32, d: f32) -> f32 {
-    logsum(logsum(a, b), logsum(c, d))
+    Logsum::shared().four(a, b, c, d)
 }
 
 fn near(left: f32, right: f32) -> bool {

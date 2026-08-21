@@ -50,6 +50,7 @@ impl<'a> ProfileDatabase<'a> {
             ));
         }
 
+        let inverse_scale = f32::from(scale).recip();
         let mut profiles = Vec::with_capacity(profile_count);
         for _ in 0..profile_count {
             let name = reader.short_string()?;
@@ -67,10 +68,18 @@ impl<'a> ProfileDatabase<'a> {
                 return Err(Error::model("invalid profile E-value calibration"));
             }
             let consensus = reader.take(model_length)?;
-            let local_entry = reader.take(checked_size(&[model_length, 3])?)?;
-            let match_scores = reader.take(checked_size(&[model_length, ALPHABET_SIZE, 3])?)?;
-            let transition_scores =
-                reader.take(checked_size(&[model_length - 1, TRANSITION_COUNT, 3])?)?;
+            let local_entry = decode_scores(
+                reader.take(checked_size(&[model_length, 3])?)?,
+                inverse_scale,
+            );
+            let match_scores = decode_scores(
+                reader.take(checked_size(&[model_length, ALPHABET_SIZE, 3])?)?,
+                inverse_scale,
+            );
+            let transition_scores = decode_scores(
+                reader.take(checked_size(&[model_length - 1, TRANSITION_COUNT, 3])?)?,
+                inverse_scale,
+            );
             profiles.push(Profile {
                 name,
                 species,
@@ -82,7 +91,6 @@ impl<'a> ProfileDatabase<'a> {
                 local_entry,
                 match_scores,
                 transition_scores,
-                inverse_scale: f32::from(scale).recip(),
             });
         }
         if !reader.remaining().is_empty() {
@@ -119,10 +127,9 @@ pub struct Profile<'a> {
     forward_tau: f32,
     forward_lambda: f32,
     consensus: &'a [u8],
-    local_entry: &'a [u8],
-    match_scores: &'a [u8],
-    transition_scores: &'a [u8],
-    inverse_scale: f32,
+    local_entry: Box<[f32]>,
+    match_scores: Box<[f32]>,
+    transition_scores: Box<[f32]>,
 }
 
 impl Profile<'_> {
@@ -154,32 +161,51 @@ impl Profile<'_> {
         self.consensus
     }
 
+    #[inline]
     pub fn local_entry_score(&self, model_position: usize) -> f32 {
-        decode_score(self.local_entry, model_position - 1, self.inverse_scale)
+        self.local_entry[model_position - 1]
     }
 
+    #[inline]
     pub fn match_score(&self, model_position: usize, residue_index: usize) -> f32 {
-        decode_score(
-            self.match_scores,
-            (model_position - 1) * ALPHABET_SIZE + residue_index,
-            self.inverse_scale,
-        )
+        self.match_scores[(model_position - 1) * ALPHABET_SIZE + residue_index]
     }
 
+    #[inline]
     pub fn transition_score(&self, model_position: usize, transition: usize) -> f32 {
-        decode_score(
-            self.transition_scores,
-            (model_position - 1) * TRANSITION_COUNT + transition,
-            self.inverse_scale,
-        )
+        self.transition_scores[(model_position - 1) * TRANSITION_COUNT + transition]
+    }
+
+    #[inline]
+    pub(crate) fn local_entry_scores(&self) -> &[f32] {
+        &self.local_entry
+    }
+
+    #[inline]
+    pub(crate) fn match_score_rows(&self) -> &[[f32; ALPHABET_SIZE]] {
+        let (rows, remainder) = self.match_scores.as_chunks();
+        debug_assert!(remainder.is_empty());
+        rows
+    }
+
+    #[inline]
+    pub(crate) fn transition_score_rows(&self) -> &[[f32; TRANSITION_COUNT]] {
+        let (rows, remainder) = self.transition_scores.as_chunks();
+        debug_assert!(remainder.is_empty());
+        rows
     }
 }
 
-fn decode_score(bytes: &[u8], index: usize, inverse_scale: f32) -> f32 {
-    let offset = index * 3;
-    let encoded = u32::from(bytes[offset])
-        | (u32::from(bytes[offset + 1]) << 8)
-        | (u32::from(bytes[offset + 2]) << 16);
+fn decode_scores(bytes: &[u8], inverse_scale: f32) -> Box<[f32]> {
+    bytes
+        .chunks_exact(3)
+        .map(|bytes| decode_score(bytes, inverse_scale))
+        .collect()
+}
+
+fn decode_score(bytes: &[u8], inverse_scale: f32) -> f32 {
+    debug_assert_eq!(bytes.len(), 3);
+    let encoded = u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
     let quantized = if encoded & 0x80_0000 == 0 {
         encoded as i32
     } else {
@@ -262,17 +288,17 @@ mod tests {
     #[test]
     fn signed_24_bit_scores_decode_without_losing_the_sentinel() {
         let inverse_scale = 32_768.0_f32.recip();
-        assert_eq!(decode_score(&[0, 0, 0], 0, inverse_scale), 0.0);
+        assert_eq!(decode_score(&[0, 0, 0], inverse_scale), 0.0);
         assert_eq!(
-            decode_score(&[0xff, 0xff, 0xff], 0, inverse_scale),
+            decode_score(&[0xff, 0xff, 0xff], inverse_scale),
             -inverse_scale
         );
         assert_eq!(
-            decode_score(&[0xff, 0xff, 0x7f], 0, inverse_scale),
+            decode_score(&[0xff, 0xff, 0x7f], inverse_scale),
             ((1 << 23) - 1) as f32 * inverse_scale
         );
         assert_eq!(
-            decode_score(&[0, 0, 0x80], 0, inverse_scale),
+            decode_score(&[0, 0, 0x80], inverse_scale),
             f32::NEG_INFINITY
         );
     }
