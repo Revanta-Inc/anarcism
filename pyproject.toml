@@ -1,19 +1,63 @@
 [project]
 name = "anarcism"
 version = "0.1.0"
-description = "Pinned native reference environment for anarcism compatibility generation"
+description = "ANARCI-compatible IMGT numbering for antibody and TCR variable domains, with no external tools or data files"
 readme = "README.md"
+requires-python = ">=3.11"
 authors = [
     { name = "Moritz Onken", email = "mo@revanta.bio" }
 ]
-requires-python = ">=3.14"
-dependencies = [
-    "anarci==2026.2.13.2",
+license = "LicenseRef-Proprietary"
+license-files = ["THIRD_PARTY_NOTICES.md"]
+keywords = ["antibody", "tcr", "imgt", "numbering", "anarci", "bioinformatics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
 ]
+dependencies = []
 
-[project.scripts]
-anarcism = "anarcism:main"
+[project.urls]
+Repository = "https://github.com/revanta/anarcism"
 
 [build-system]
-requires = ["uv_build>=0.12.5,<0.13.0"]
-build-backend = "uv_build"
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+# The bindings crate is a workspace member, so the build is driven from the
+# repository root: `manifest-path` selects the crate and the sdist then carries
+# the whole workspace. Pure-Rust sources plus `python-source` gives a mixed
+# layout, so stubs and any pure-Python layer ship alongside the extension.
+manifest-path = "crates/anarcism-python/Cargo.toml"
+module-name = "anarcism._anarcism"
+python-source = "python"
+features = ["pyo3/extension-module"]
+profile = "python"
+# `cargo package --list` only reports files inside the selected crate, so the
+# embedded model binaries, the pinned toolchain, and the notices have to be
+# named explicitly or the sdist produces a wheel that cannot compile.
+include = [
+    { path = "assets/**/*", format = "sdist" },
+    { path = "rust-toolchain.toml", format = "sdist" },
+    { path = "THIRD_PARTY_NOTICES.md", format = "sdist" },
+]
+
+[dependency-groups]
+# The pinned native ANARCI/HMMER reference. It generates the golden corpora and
+# backs the parity and comparison benchmarks; it is never a runtime dependency
+# of the published wheel. Install it alone, without building the extension:
+#   uv sync --locked --no-install-project --no-default-groups --group reference
+reference = [
+    "anarci==2026.2.13.2",
+]
+dev = [
+    "maturin>=1.9,<2.0",
+    "pytest>=8.4.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

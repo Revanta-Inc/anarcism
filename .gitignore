@@ -13,3 +13,8 @@ playwright-report/
 
 # Virtual environments
 .venv
+
+# Python extension build output
+python/anarcism/*.so
+python/anarcism/*.pyd
+.pytest_cache/

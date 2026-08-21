@@ -29,3 +29,14 @@ strip = "symbols"
 inherits = "release"
 debug = true
 
+[profile.benchmark]
+inherits = "release"
+opt-level = 3
+
+# Python extension modules. `opt-level = "z"` exists for the browser byte
+# budget, which a wheel does not have, and PyO3 needs unwinding to turn a Rust
+# panic into a Python exception instead of aborting the interpreter.
+[profile.python]
+inherits = "release"
+opt-level = 3
+panic = "unwind"
