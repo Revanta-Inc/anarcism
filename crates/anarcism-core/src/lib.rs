@@ -10,6 +10,8 @@ mod numbering;
 mod sequence;
 mod types;
 
+#[cfg(not(target_family = "wasm"))]
+pub use engine::number_sequences_parallel;
 pub use engine::{
     number_fasta, number_sequence, number_sequence_with_id, number_sequences,
     validate_antibody_pair,

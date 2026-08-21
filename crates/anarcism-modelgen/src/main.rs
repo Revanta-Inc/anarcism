@@ -6,9 +6,9 @@ use std::fmt::{self, Display};
 use std::fs;
 use std::path::PathBuf;
 
-const MAGIC: &[u8; 8] = b"ANRCPRF1";
-const FORMAT_VERSION: u16 = 1;
-const SCORE_SCALE: f32 = 1024.0;
+const MAGIC: &[u8; 8] = b"ANRCPRF2";
+const FORMAT_VERSION: u16 = 2;
+const SCORE_SCALE: f32 = 32_768.0;
 const MODEL_LENGTH: usize = 128;
 const ALPHABET: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
 const BACKGROUND: [f32; 20] = [
@@ -319,13 +319,13 @@ fn encode(profiles: &[RawProfile]) -> Result<Vec<u8>> {
 
         let entries = local_entry_scores(&profile.transitions_nlog, profile.length);
         for score in entries {
-            push_i16(&mut output, quantize(score));
+            push_i24(&mut output, quantize(score));
         }
 
         for node in &profile.match_nlog {
             for (negative_log_probability, background) in node.iter().zip(BACKGROUND) {
                 let score = -*negative_log_probability - background.ln();
-                push_i16(&mut output, quantize(score));
+                push_i24(&mut output, quantize(score));
             }
         }
 
@@ -333,7 +333,7 @@ fn encode(profiles: &[RawProfile]) -> Result<Vec<u8>> {
         // to derive occupancy/local-entry scores; node M cannot transition.
         for node in profile.transitions_nlog.iter().take(profile.length).skip(1) {
             for negative_log_probability in node {
-                push_i16(&mut output, quantize(-*negative_log_probability));
+                push_i24(&mut output, quantize(-*negative_log_probability));
             }
         }
     }
@@ -374,13 +374,13 @@ fn local_entry_scores(transitions: &[[f32; 7]], length: usize) -> Vec<f32> {
         .collect()
 }
 
-fn quantize(score: f32) -> i16 {
+fn quantize(score: f32) -> i32 {
     if !score.is_finite() {
-        i16::MIN
+        -(1 << 23)
     } else {
         (score * SCORE_SCALE)
             .round()
-            .clamp((i16::MIN + 1) as f32, i16::MAX as f32) as i16
+            .clamp((-(1 << 23) + 1) as f32, ((1 << 23) - 1) as f32) as i32
     }
 }
 
@@ -398,8 +398,8 @@ fn push_u16(output: &mut Vec<u8>, value: u16) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_i16(output: &mut Vec<u8>, value: i16) {
-    output.extend_from_slice(&value.to_le_bytes());
+fn push_i24(output: &mut Vec<u8>, value: i32) {
+    output.extend_from_slice(&value.to_le_bytes()[..3]);
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
@@ -412,8 +412,8 @@ mod tests {
 
     #[test]
     fn quantization_reserves_minimum_for_impossible_scores() {
-        assert_eq!(quantize(f32::NEG_INFINITY), i16::MIN);
-        assert_ne!(quantize(-32.0), i16::MIN);
+        assert_eq!(quantize(f32::NEG_INFINITY), -(1 << 23));
+        assert_ne!(quantize(-32.0), -(1 << 23));
     }
 
     #[test]

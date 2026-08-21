@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
+#[cfg(not(target_family = "wasm"))]
+use std::num::NonZeroUsize;
 
 use crate::germlines::assign_closest_germline;
 use crate::hmm::{
-    RawDomain, forward_bit_score, trace_emission_score, trace_null2_bias_bits,
-    ungapped_filter_score, viterbi_domains,
+    RawDomain, define_domain, domain_bit_score_with_null2, realign_domain, realign_envelope,
+    recover_long_cdr3, trace_emission_score, ungapped_filter_score, viterbi_domains,
 };
 use crate::numbering::number_imgt;
 use crate::sequence::normalize_sequence;
@@ -18,6 +20,7 @@ struct Candidate<'a> {
     profile: &'a Profile<'a>,
     domain: RawDomain,
     bit_score: f32,
+    ranking_score: f32,
 }
 
 pub fn number_sequence(sequence: &str, options: &NumberingOptions) -> Result<SequenceResult> {
@@ -37,21 +40,53 @@ pub fn number_sequences(
     options: &NumberingOptions,
 ) -> Result<Vec<SequenceResult>> {
     let limits = ValidationLimits::default();
-    if inputs.len() > limits.max_batch_size {
-        return Err(Error::sequence(
-            ErrorCode::BatchTooLarge,
-            format!(
-                "batch contains {} sequences; configured limit is {}",
-                inputs.len(),
-                limits.max_batch_size
-            ),
-            None,
-        ));
+    number_sequences_with_limits(inputs, options, limits)
+}
+
+/// Number a native batch concurrently while preserving input order.
+///
+/// The caller chooses the maximum worker count explicitly so applications
+/// that already own a thread pool can avoid accidental oversubscription.
+/// WebAssembly builds omit this API and retain the serial batch path.
+#[cfg(not(target_family = "wasm"))]
+pub fn number_sequences_parallel(
+    inputs: &[SequenceInput],
+    options: &NumberingOptions,
+    worker_count: NonZeroUsize,
+) -> Result<Vec<SequenceResult>> {
+    let limits = ValidationLimits::default();
+    validate_batch_size(inputs, limits)?;
+    let worker_count = worker_count.get().min(inputs.len());
+    if worker_count <= 1 {
+        return number_sequences_with_limits(inputs, options, limits);
     }
-    inputs
-        .iter()
-        .map(|input| number_sequence_with_limits(&input.id, &input.sequence, options, limits))
-        .collect()
+
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..worker_count)
+            .map(|worker_index| {
+                let start = worker_index * inputs.len() / worker_count;
+                let end = (worker_index + 1) * inputs.len() / worker_count;
+                let chunk = &inputs[start..end];
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|input| {
+                            number_sequence_with_limits(&input.id, &input.sequence, options, limits)
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+            })
+            .collect();
+        let mut results = Vec::with_capacity(inputs.len());
+        for worker in workers {
+            let shard = match worker.join() {
+                Ok(shard) => shard?,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
+            results.extend(shard);
+        }
+        Ok(results)
+    })
 }
 
 pub fn number_fasta(fasta: &str, options: &NumberingOptions) -> Result<Vec<SequenceResult>> {
@@ -121,6 +156,14 @@ fn number_sequences_with_limits(
     options: &NumberingOptions,
     limits: ValidationLimits,
 ) -> Result<Vec<SequenceResult>> {
+    validate_batch_size(inputs, limits)?;
+    inputs
+        .iter()
+        .map(|input| number_sequence_with_limits(&input.id, &input.sequence, options, limits))
+        .collect()
+}
+
+fn validate_batch_size(inputs: &[SequenceInput], limits: ValidationLimits) -> Result<()> {
     if inputs.len() > limits.max_batch_size {
         return Err(Error::sequence(
             ErrorCode::BatchTooLarge,
@@ -132,10 +175,7 @@ fn number_sequences_with_limits(
             None,
         ));
     }
-    inputs
-        .iter()
-        .map(|input| number_sequence_with_limits(&input.id, &input.sequence, options, limits))
-        .collect()
+    Ok(())
 }
 
 fn intersect_pair_chains(
@@ -198,7 +238,10 @@ fn number_sequence_with_limits(
         .profiles()
         .iter()
         .filter(|profile| profile_is_allowed(profile, options))
-        .map(|profile| (ungapped_filter_score(profile, &normalized.encoded), profile))
+        .map(|profile| {
+            let filter_score = ungapped_filter_score(profile, &normalized.encoded);
+            (profile_significance(profile, filter_score), profile)
+        })
         .collect();
     ranked_profiles.sort_by(|left, right| {
         right
@@ -207,16 +250,24 @@ fn number_sequence_with_limits(
             .then_with(|| left.1.name().cmp(right.1.name()))
     });
     let estimated_domains = ((normalized.encoded.len() + 49) / 100).clamp(1, 7);
-    let profiles_to_trace = (options.alternative_hit_count + 5)
+    // Keep every species profile for the likely chain family in reach of the
+    // exact Forward pass. Closely related H/K profiles can rank poorly under
+    // an ungapped filter yet win decisively once their indel path is scored.
+    let profiles_to_trace = options
+        .alternative_hit_count
+        .saturating_add(7)
+        .max(10)
         .saturating_mul(estimated_domains)
         .min(ranked_profiles.len());
+    let profiles_to_score_per_domain = options.alternative_hit_count.saturating_add(7).max(10);
     let eligible = ranked_profiles
         .into_iter()
         .take(profiles_to_trace)
         .map(|(_, profile)| profile);
     let mut candidates = Vec::new();
     for profile in eligible {
-        for domain in viterbi_domains(profile, &normalized.encoded) {
+        let profile_domains = viterbi_domains(profile, &normalized.encoded);
+        for domain in profile_domains.iter().cloned() {
             if domain.end <= domain.start {
                 continue;
             }
@@ -225,29 +276,54 @@ fn number_sequence_with_limits(
                 profile,
                 domain,
                 bit_score,
+                ranking_score: profile_significance(profile, bit_score),
             });
         }
     }
 
     let clusters = cluster_candidates(candidates);
-    let mut scored_clusters = Vec::with_capacity(clusters.len());
+    let mut raw_scored_clusters = Vec::with_capacity(clusters.len());
     for mut cluster in clusters {
         cluster.sort_by(candidate_order);
+        // Viterbi trace scores eliminate the reserve profile before the
+        // costlier Forward/Backward posterior pass. Every candidate that can
+        // be returned (winner plus requested alternatives) remains exact.
+        cluster.truncate(profiles_to_score_per_domain);
         for candidate in &mut cluster {
-            candidate.bit_score = forward_bit_score(
-                candidate.profile,
-                &normalized.encoded[candidate.domain.start..candidate.domain.end],
-            ) - trace_null2_bias_bits(
-                candidate.profile,
-                &candidate.domain,
-                &normalized.encoded,
-            );
+            score_defined_domain_candidate(candidate, &normalized.encoded);
         }
+        cluster.sort_by(candidate_order);
+        raw_scored_clusters.push(cluster);
+    }
+
+    // Domain definition can expand several short Viterbi seeds onto the same
+    // posterior envelope. Recluster those exact envelopes so one biological
+    // domain is not reported once for every seed that led to it.
+    let mut raw_scored_clusters =
+        cluster_candidates(raw_scored_clusters.into_iter().flatten().collect());
+
+    let is_multidomain_target = raw_scored_clusters.len() > 1;
+    if is_multidomain_target {
+        // Optimized HMMER and the scalar browser implementation can differ by
+        // a few thousandths in calibrated significance. Within that narrow
+        // numerical uncertainty band, prefer the higher domain bit score;
+        // this mirrors the optimized ordering at multidomain boundaries.
+        for cluster in &mut raw_scored_clusters {
+            cluster.sort_by(multidomain_candidate_order);
+        }
+    }
+
+    let mut scored_clusters = Vec::with_capacity(raw_scored_clusters.len());
+    for mut cluster in raw_scored_clusters {
         cluster.retain(|candidate| candidate.bit_score >= options.min_bit_score);
         if cluster.is_empty() {
             continue;
         }
-        cluster.sort_by(candidate_order);
+        if is_multidomain_target {
+            cluster.sort_by(multidomain_candidate_order);
+        } else {
+            cluster.sort_by(candidate_order);
+        }
         scored_clusters.push(cluster);
     }
 
@@ -255,10 +331,25 @@ fn number_sequence_with_limits(
     let mut domains = Vec::with_capacity(domain_count);
     for (domain_index, cluster) in scored_clusters.into_iter().enumerate() {
         let best = &cluster[0];
+        let aligned_domain = if domain_count == 1 {
+            // Domain definition has already selected the exact simple-region
+            // or stochastic-cluster envelope. OA alignment must stay inside
+            // it; ANARCI's later J-region recovery handles a genuinely long
+            // CDR3 without changing the HMMER domain score.
+            realign_envelope(best.profile, &best.domain, &normalized.encoded)
+        } else {
+            realign_domain(best.profile, &best.domain, &normalized.encoded)
+        };
+        let aligned_domain = if domain_count == 1 {
+            recover_long_cdr3(database.profiles(), &aligned_domain, &normalized.encoded)
+        } else {
+            aligned_domain
+        };
         let (numbering, padded_imgt_alignment, start, end) = number_imgt(
             normalized.text.as_bytes(),
-            &best.domain,
+            &aligned_domain,
             best.profile.chain_type(),
+            best.profile.species(),
             domain_index == 0,
             domain_count == 1,
         );
@@ -270,7 +361,7 @@ fn number_sequence_with_limits(
             .collect();
         let germline = if options.assign_germline {
             assign_closest_germline(
-                &best.domain,
+                &aligned_domain,
                 normalized.text.as_bytes(),
                 best.profile.chain_type(),
                 options.allowed_species.as_deref(),
@@ -286,9 +377,9 @@ fn number_sequence_with_limits(
             start,
             end,
             bit_score: best.bit_score,
-            // Forward/null1 is accurate, but HMMER's final score and E-value also
-            // apply null2 composition correction. Keep the public optional field
-            // absent until that last correction is implemented and parity-tested.
+            // Posterior null2 is included, but fixed-point profile scores and
+            // scalar arithmetic are not bit-identical to optimized HMMER, and
+            // its complete final E-value accounting is outside this subset.
             e_value: None,
             numbering,
             padded_imgt_alignment,
@@ -303,6 +394,19 @@ fn number_sequence_with_limits(
         domains,
         warnings: normalized.warnings,
     })
+}
+
+fn score_defined_domain_candidate(candidate: &mut Candidate<'_>, sequence: &[u8]) {
+    let definition = define_domain(candidate.profile, &candidate.domain, sequence);
+    candidate.domain.start = definition.start;
+    candidate.domain.end = definition.end;
+    candidate.bit_score = domain_bit_score_with_null2(
+        candidate.profile,
+        &candidate.domain,
+        sequence,
+        definition.trace_null2_bias,
+    );
+    candidate.ranking_score = profile_significance(candidate.profile, candidate.bit_score);
 }
 
 fn validate_options(options: &NumberingOptions) -> Result<()> {
@@ -400,9 +504,24 @@ fn domains_overlap(left: &Candidate<'_>, right: &Candidate<'_>) -> bool {
 
 fn candidate_order(left: &Candidate<'_>, right: &Candidate<'_>) -> std::cmp::Ordering {
     right
-        .bit_score
-        .total_cmp(&left.bit_score)
+        .ranking_score
+        .total_cmp(&left.ranking_score)
         .then_with(|| left.profile.name().cmp(right.profile.name()))
+}
+
+fn multidomain_candidate_order(left: &Candidate<'_>, right: &Candidate<'_>) -> std::cmp::Ordering {
+    if (left.ranking_score - right.ranking_score).abs() <= 0.01 {
+        right
+            .bit_score
+            .total_cmp(&left.bit_score)
+            .then_with(|| left.profile.name().cmp(right.profile.name()))
+    } else {
+        candidate_order(left, right)
+    }
+}
+
+fn profile_significance(profile: &Profile<'_>, bit_score: f32) -> f32 {
+    profile.forward_lambda() * (bit_score - profile.forward_tau())
 }
 
 fn candidate_hit(candidate: &Candidate<'_>) -> ProfileHit {
@@ -470,5 +589,31 @@ mod tests {
         assert_eq!(light_assignment.v_gene.as_deref(), Some("IGKV6-13*01"));
         assert_eq!(light_assignment.j_gene.as_deref(), Some("IGKJ5*01"));
         assert_eq!(light_assignment.j_identity, Some(1.0));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn parallel_batch_matches_serial_order_and_results() {
+        let inputs = vec![
+            SequenceInput {
+                id: "heavy".into(),
+                sequence: VH.into(),
+            },
+            SequenceInput {
+                id: "light".into(),
+                sequence: VL.into(),
+            },
+        ];
+        let options = NumberingOptions::default();
+        let serial = number_sequences(&inputs, &options).unwrap();
+        for worker_count in [1, 2, 8] {
+            let parallel = number_sequences_parallel(
+                &inputs,
+                &options,
+                NonZeroUsize::new(worker_count).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(parallel, serial);
+        }
     }
 }

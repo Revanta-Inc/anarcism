@@ -12,16 +12,20 @@ pub(crate) fn number_imgt(
     sequence: &[u8],
     domain: &RawDomain,
     chain_type: ChainType,
+    species: &str,
     is_first_domain: bool,
     is_only_domain: bool,
 ) -> (Vec<NumberedResidue>, String, usize, usize) {
-    let steps = extend_terminal_steps(
+    let mut steps = extend_terminal_steps(
         sequence,
         domain,
         chain_type,
+        species,
         is_first_domain,
         is_only_domain,
     );
+    canonicalize_boundary_insertions(&mut steps);
+    steps = smooth_insertions(steps);
     let mut segments: [Vec<LabelledResidue>; 7] = std::array::from_fn(|_| Vec::new());
     let mut cdr_indices: [Vec<usize>; 3] = std::array::from_fn(|_| Vec::new());
     let mut insertion_counts = [0_usize; 129];
@@ -59,6 +63,12 @@ pub(crate) fn number_imgt(
         }
     }
 
+    // ANARCI refuses to assign IMGT labels once CDR3 exceeds the insertion
+    // alphabet it supports, but it still reports the detected domain bounds.
+    if cdr_indices[2].len() > 117 {
+        return (Vec::new(), String::new(), domain.start, domain.end);
+    }
+
     segments[1] = label_cdr(&cdr_indices[0], 12, 27, 39);
     segments[3] = label_cdr(&cdr_indices[1], 10, 56, 66);
     segments[5] = label_cdr(&cdr_indices[2], 13, 105, 118);
@@ -89,10 +99,48 @@ pub(crate) fn number_imgt(
     (numbering, padded_alignment, start, end)
 }
 
+/// Resolve the one-state ambiguity immediately outside ANARCI's smoothing
+/// windows. Generic and SIMD HMMER traces can put the same insertion on
+/// opposite sides of a boundary; the neighboring matches identify which
+/// side of the window it belongs to.
+fn canonicalize_boundary_insertions(steps: &mut [TraceStep]) {
+    let mut index = 0;
+    while index < steps.len() {
+        if steps[index].state != TraceState::Insert {
+            index += 1;
+            continue;
+        }
+        let group_start = index;
+        let position = steps[index].model_position;
+        while index < steps.len()
+            && steps[index].state == TraceState::Insert
+            && steps[index].model_position == position
+        {
+            index += 1;
+        }
+        let next_match = steps[index..]
+            .iter()
+            .find(|step| step.state != TraceState::Delete);
+
+        let replacement = [25_u16, 54, 103].into_iter().find(|start| {
+            position + 1 == *start
+                && next_match.is_some_and(|step| {
+                    step.state == TraceState::Match && step.model_position == *start
+                })
+        });
+        if let Some(replacement) = replacement {
+            for step in &mut steps[group_start..index] {
+                step.model_position = replacement;
+            }
+        }
+    }
+}
+
 fn extend_terminal_steps(
     sequence: &[u8],
     domain: &RawDomain,
     chain_type: ChainType,
+    species: &str,
     is_first_domain: bool,
     is_only_domain: bool,
 ) -> Vec<TraceStep> {
@@ -109,7 +157,15 @@ fn extend_terminal_steps(
         let missing_model_positions = usize::from(first.model_position.saturating_sub(1));
         if missing_model_positions > 0 && missing_model_positions < 5 {
             let first_sequence_index = first.sequence_index.unwrap_or(0);
-            let extension = missing_model_positions.min(first_sequence_index);
+            // Port ANARCI's asymmetric N-terminal extension exactly. When
+            // the model starts farther in than the query, only the unmatched
+            // difference is prepended; the remaining query prefix stays
+            // outside the numbered domain.
+            let extension = if missing_model_positions > first_sequence_index {
+                first_sequence_index.min(missing_model_positions - first_sequence_index)
+            } else {
+                missing_model_positions
+            };
             let mut prefix = Vec::with_capacity(extension);
             for offset in (1..=extension).rev() {
                 prefix.push(TraceStep {
@@ -149,8 +205,13 @@ fn extend_terminal_steps(
             .unwrap_or(last_emitting);
         let last = steps[last_emitting];
         let last_sequence_index = last.sequence_index.unwrap_or(sequence.len());
+        // ANARCI derives this from the first pinned J germline after
+        // stripping terminal gaps. All kappa/beta and non-human lambda J
+        // sets end at 127; human lambda and the other model families end at
+        // 128.
         let effective_model_end = match chain_type {
-            ChainType::K | ChainType::L | ChainType::B => 127,
+            ChainType::K | ChainType::B => 127,
+            ChainType::L if species != "human" => 127,
             _ => 128,
         };
         if last.model_position > 123
@@ -168,6 +229,183 @@ fn extend_terminal_steps(
         }
     }
     steps
+}
+
+#[derive(Clone, Copy)]
+enum SmoothingRegion {
+    NTerminus,
+    Junction(usize),
+}
+
+/// Port of ANARCI's `smooth_insertions()`. HMMER can place an insertion on
+/// either side of a framework/CDR junction when the local paths have nearly
+/// equal accuracy. ANARCI normalizes those small buffers to fixed IMGT state
+/// patterns before it divides the trace into regions.
+fn smooth_insertions(steps: Vec<TraceStep>) -> Vec<TraceStep> {
+    const PATTERNS: [[(u16, TraceState); 4]; 6] = [
+        [
+            (25, TraceState::Match),
+            (26, TraceState::Match),
+            (27, TraceState::Match),
+            (28, TraceState::Insert),
+        ],
+        [
+            (38, TraceState::Insert),
+            (38, TraceState::Match),
+            (39, TraceState::Match),
+            (40, TraceState::Match),
+        ],
+        [
+            (54, TraceState::Match),
+            (55, TraceState::Match),
+            (56, TraceState::Match),
+            (57, TraceState::Insert),
+        ],
+        [
+            (65, TraceState::Insert),
+            (65, TraceState::Match),
+            (66, TraceState::Match),
+            (67, TraceState::Match),
+        ],
+        [
+            (103, TraceState::Match),
+            (104, TraceState::Match),
+            (105, TraceState::Match),
+            (106, TraceState::Insert),
+        ],
+        [
+            (117, TraceState::Insert),
+            (117, TraceState::Match),
+            (118, TraceState::Match),
+            (119, TraceState::Match),
+        ],
+    ];
+
+    let mut smoothed = Vec::with_capacity(steps.len());
+    let mut buffer = Vec::new();
+    let mut buffered_region = None;
+    for step in steps {
+        let follows_boundary_match = step.state == TraceState::Insert
+            && matches!(step.model_position, 40 | 67 | 119)
+            && smoothed
+                .iter()
+                .chain(buffer.iter())
+                .rev()
+                .find(|previous: &&TraceStep| {
+                    !matches!(previous.state, TraceState::Insert | TraceState::Delete)
+                })
+                .is_some_and(|previous| previous.model_position == step.model_position);
+        let region = match step.model_position {
+            _ if follows_boundary_match => None,
+            1..=22 => Some(SmoothingRegion::NTerminus),
+            25..=27 => Some(SmoothingRegion::Junction(0)),
+            38..=40 => Some(SmoothingRegion::Junction(1)),
+            54..=56 => Some(SmoothingRegion::Junction(2)),
+            65..=67 => Some(SmoothingRegion::Junction(3)),
+            103..=105 => Some(SmoothingRegion::Junction(4)),
+            117..=119 => Some(SmoothingRegion::Junction(5)),
+            _ => None,
+        };
+        if let Some(region) = region {
+            buffer.push(step);
+            buffered_region = Some(region);
+        } else if buffer.is_empty() {
+            smoothed.push(step);
+        } else {
+            if let Some(region) = buffered_region {
+                flush_smoothing_buffer(&mut smoothed, &mut buffer, region, &PATTERNS);
+            } else {
+                smoothed.append(&mut buffer);
+            }
+            smoothed.push(step);
+            buffered_region = None;
+        }
+    }
+
+    // ANARCI intentionally does not flush a terminal buffer. This is visible
+    // for alignments ending inside one of the junction ranges.
+    smoothed
+}
+
+fn flush_smoothing_buffer(
+    smoothed: &mut Vec<TraceStep>,
+    buffer: &mut Vec<TraceStep>,
+    region: SmoothingRegion,
+    patterns: &[[(u16, TraceState); 4]; 6],
+) {
+    let insertion_count = buffer
+        .iter()
+        .filter(|step| step.state == TraceState::Insert)
+        .count();
+    if insertion_count == 0 {
+        smoothed.append(buffer);
+        return;
+    }
+
+    match region {
+        SmoothingRegion::NTerminus => {
+            let mut terminal_deletions = usize::from(buffer[0].model_position.saturating_sub(1));
+            for step in buffer.iter() {
+                if step.state == TraceState::Delete || step.sequence_index.is_none() {
+                    terminal_deletions += 1;
+                } else {
+                    break;
+                }
+            }
+            if terminal_deletions < insertion_count {
+                smoothed.append(buffer);
+                return;
+            }
+
+            let matched_positions: Vec<u16> = buffer
+                .iter()
+                .filter(|step| step.state == TraceState::Match)
+                .map(|step| step.model_position)
+                .collect();
+            buffer.retain(|step| step.state != TraceState::Delete);
+            let Some(&first_match) = matched_positions.first() else {
+                smoothed.append(buffer);
+                return;
+            };
+            let added = buffer.len().saturating_sub(matched_positions.len());
+            let Some(first_added) = first_match.checked_sub(added as u16) else {
+                smoothed.append(buffer);
+                return;
+            };
+            let positions = (first_added..first_match).chain(matched_positions);
+            for (step, model_position) in buffer.drain(..).zip(positions) {
+                smoothed.push(TraceStep {
+                    state: TraceState::Match,
+                    model_position,
+                    sequence_index: step.sequence_index,
+                });
+            }
+        }
+        SmoothingRegion::Junction(region_index) => {
+            buffer.retain(|step| step.state != TraceState::Delete);
+            let pattern = patterns[region_index];
+            let length = buffer.len();
+            let states: Vec<(u16, TraceState)> = if region_index % 2 == 1 {
+                let pattern_start = 4_usize.saturating_sub(length).max(1);
+                std::iter::repeat_n(pattern[0], length.saturating_sub(3))
+                    .chain(pattern[pattern_start..].iter().copied())
+                    .collect()
+            } else {
+                pattern[..length.min(3)]
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat_n(pattern[2], length.saturating_sub(3)))
+                    .collect()
+            };
+            for (step, (model_position, state)) in buffer.drain(..).zip(states) {
+                smoothed.push(TraceStep {
+                    state,
+                    model_position,
+                    sequence_index: step.sequence_index,
+                });
+            }
+        }
+    }
 }
 
 fn cdr_index(position: usize) -> Option<usize> {
@@ -298,19 +536,18 @@ fn padded_alignment(sequence: &[u8], labelled: &[LabelledResidue]) -> String {
         alignment.push(char::from(sequence[residue.sequence_index]));
         previous_position = previous_position.max(residue.position);
     }
+    if previous_position < 117 {
+        alignment.extend(std::iter::repeat_n(
+            '-',
+            usize::from(117 - previous_position),
+        ));
+    }
     alignment
 }
 
-fn insertion_code(mut index: usize) -> String {
-    let mut result = String::new();
-    loop {
-        let digit = (index % 26) as u8;
-        result.insert(0, char::from(b'A' + digit));
-        if index < 26 {
-            return result;
-        }
-        index = index / 26 - 1;
-    }
+fn insertion_code(index: usize) -> String {
+    let letter = char::from(b'A' + (index % 26) as u8);
+    std::iter::repeat_n(letter, index / 26 + 1).collect()
 }
 
 #[cfg(test)]
@@ -338,5 +575,6 @@ mod tests {
         assert_eq!(insertion_code(0), "A");
         assert_eq!(insertion_code(25), "Z");
         assert_eq!(insertion_code(26), "AA");
+        assert_eq!(insertion_code(27), "BB");
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::hmm::{RawDomain, TraceState};
 use crate::{ChainType, Error, GermlineAssignment, Result};
 
@@ -7,8 +9,18 @@ const ALIGNMENT_LENGTH: usize = 128;
 const PACKED_LENGTH: usize = ALIGNMENT_LENGTH * 5 / 8;
 const ALPHABET: &[u8; 21] = b"-ACDEFGHIKLMNPQRSTVWY";
 
-pub fn embedded_germlines() -> Result<GermlineDatabase<'static>> {
-    GermlineDatabase::from_bytes(include_bytes!("../../../assets/germlines.bin"))
+/// Decodes the embedded germline database once per process and lends it out.
+///
+/// Germline assignment reads the database for every domain, so the decode is
+/// cached the same way [`crate::embedded_profiles`] is.
+pub fn embedded_germlines() -> Result<&'static GermlineDatabase<'static>> {
+    static DATABASE: OnceLock<Result<GermlineDatabase<'static>>> = OnceLock::new();
+    DATABASE
+        .get_or_init(|| {
+            GermlineDatabase::from_bytes(include_bytes!("../../../assets/germlines.bin"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,7 +120,7 @@ pub(crate) fn assign_closest_germline(
     let database = embedded_germlines()?;
     let state_sequence = state_sequence(domain, sequence);
     let best_v = best_match(
-        &database,
+        database,
         Segment::V,
         chain_type,
         allowed_species,
@@ -119,7 +131,7 @@ pub(crate) fn assign_closest_germline(
     };
     let assigned_species = [v.species.to_owned()];
     let best_j = best_match(
-        &database,
+        database,
         Segment::J,
         chain_type,
         Some(&assigned_species),
@@ -261,6 +273,13 @@ mod tests {
     fn embedded_database_contains_pinned_inventory() {
         let database = embedded_germlines().unwrap();
         assert_eq!(database.len(), 2_389);
+    }
+
+    #[test]
+    fn embedded_database_is_decoded_once_and_shared() {
+        let first = embedded_germlines().unwrap();
+        let second = embedded_germlines().unwrap();
+        assert!(std::ptr::eq(first, second));
     }
 
     #[test]

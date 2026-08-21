@@ -1,12 +1,23 @@
+use std::sync::OnceLock;
+
 use crate::{ChainType, Error, Result};
 
-const MAGIC: &[u8; 8] = b"ANRCPRF1";
-const FORMAT_VERSION: u16 = 1;
+const MAGIC: &[u8; 8] = b"ANRCPRF2";
+const FORMAT_VERSION: u16 = 2;
 const ALPHABET_SIZE: usize = 20;
 const TRANSITION_COUNT: usize = 7;
 
-pub fn embedded_profiles() -> Result<ProfileDatabase<'static>> {
-    ProfileDatabase::from_bytes(include_bytes!("../../../assets/profiles.bin"))
+/// Decodes the embedded profile database once per process and lends it out.
+///
+/// Numbering reads the database for every sequence, so the decode is cached
+/// rather than repeated. The cached value borrows the embedded bytes, which
+/// live for the whole program, so the returned reference is `'static`.
+pub fn embedded_profiles() -> Result<&'static ProfileDatabase<'static>> {
+    static DATABASE: OnceLock<Result<ProfileDatabase<'static>>> = OnceLock::new();
+    DATABASE
+        .get_or_init(|| ProfileDatabase::from_bytes(include_bytes!("../../../assets/profiles.bin")))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 #[derive(Clone, Debug)]
@@ -56,10 +67,10 @@ impl<'a> ProfileDatabase<'a> {
                 return Err(Error::model("invalid profile E-value calibration"));
             }
             let consensus = reader.take(model_length)?;
-            let local_entry = reader.take(checked_size(&[model_length, 2])?)?;
-            let match_scores = reader.take(checked_size(&[model_length, ALPHABET_SIZE, 2])?)?;
+            let local_entry = reader.take(checked_size(&[model_length, 3])?)?;
+            let match_scores = reader.take(checked_size(&[model_length, ALPHABET_SIZE, 3])?)?;
             let transition_scores =
-                reader.take(checked_size(&[model_length - 1, TRANSITION_COUNT, 2])?)?;
+                reader.take(checked_size(&[model_length - 1, TRANSITION_COUNT, 3])?)?;
             profiles.push(Profile {
                 name,
                 species,
@@ -71,7 +82,7 @@ impl<'a> ProfileDatabase<'a> {
                 local_entry,
                 match_scores,
                 transition_scores,
-                scale: f32::from(scale),
+                inverse_scale: f32::from(scale).recip(),
             });
         }
         if !reader.remaining().is_empty() {
@@ -111,7 +122,7 @@ pub struct Profile<'a> {
     local_entry: &'a [u8],
     match_scores: &'a [u8],
     transition_scores: &'a [u8],
-    scale: f32,
+    inverse_scale: f32,
 }
 
 impl Profile<'_> {
@@ -144,14 +155,14 @@ impl Profile<'_> {
     }
 
     pub fn local_entry_score(&self, model_position: usize) -> f32 {
-        decode_score(self.local_entry, model_position - 1, self.scale)
+        decode_score(self.local_entry, model_position - 1, self.inverse_scale)
     }
 
     pub fn match_score(&self, model_position: usize, residue_index: usize) -> f32 {
         decode_score(
             self.match_scores,
             (model_position - 1) * ALPHABET_SIZE + residue_index,
-            self.scale,
+            self.inverse_scale,
         )
     }
 
@@ -159,18 +170,25 @@ impl Profile<'_> {
         decode_score(
             self.transition_scores,
             (model_position - 1) * TRANSITION_COUNT + transition,
-            self.scale,
+            self.inverse_scale,
         )
     }
 }
 
-fn decode_score(bytes: &[u8], index: usize, scale: f32) -> f32 {
-    let offset = index * 2;
-    let quantized = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
-    if quantized == i16::MIN {
+fn decode_score(bytes: &[u8], index: usize, inverse_scale: f32) -> f32 {
+    let offset = index * 3;
+    let encoded = u32::from(bytes[offset])
+        | (u32::from(bytes[offset + 1]) << 8)
+        | (u32::from(bytes[offset + 2]) << 16);
+    let quantized = if encoded & 0x80_0000 == 0 {
+        encoded as i32
+    } else {
+        (encoded | 0xff00_0000) as i32
+    };
+    if quantized == -(1 << 23) {
         f32::NEG_INFINITY
     } else {
-        f32::from(quantized) / scale
+        quantized as f32 * inverse_scale
     }
 }
 
@@ -232,5 +250,30 @@ mod tests {
         assert_eq!(database.profiles().len(), 29);
         assert_eq!(database.profiles()[0].name(), "human_H");
         assert_eq!(database.profiles()[28].name(), "mouse_D");
+    }
+
+    #[test]
+    fn embedded_database_is_decoded_once_and_shared() {
+        let first = embedded_profiles().unwrap();
+        let second = embedded_profiles().unwrap();
+        assert!(std::ptr::eq(first, second));
+    }
+
+    #[test]
+    fn signed_24_bit_scores_decode_without_losing_the_sentinel() {
+        let inverse_scale = 32_768.0_f32.recip();
+        assert_eq!(decode_score(&[0, 0, 0], 0, inverse_scale), 0.0);
+        assert_eq!(
+            decode_score(&[0xff, 0xff, 0xff], 0, inverse_scale),
+            -inverse_scale
+        );
+        assert_eq!(
+            decode_score(&[0xff, 0xff, 0x7f], 0, inverse_scale),
+            ((1 << 23) - 1) as f32 * inverse_scale
+        );
+        assert_eq!(
+            decode_score(&[0, 0, 0x80], 0, inverse_scale),
+            f32::NEG_INFINITY
+        );
     }
 }
