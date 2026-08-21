@@ -9,6 +9,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./worker-pool": {
+      "types": "./dist/worker-pool.d.ts",
+      "import": "./dist/worker-pool.js"
+    },
     "./anarcism.wasm": "./dist/anarcism.wasm"
   },
   "files": [

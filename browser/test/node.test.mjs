@@ -10,6 +10,11 @@ import init, {
   numberSequences,
   validateAntibodyPair,
 } from "../dist/index.js";
+import {
+  normalizeWorkerCount,
+  parseFasta,
+  recommendedWorkerCount,
+} from "../dist/worker-pool.js";
 
 const VH = "EVQLQQSGAEVVRSGASVKLSCTASGFNIKDYYIHWVKQRPEKGLEWIGWIDPEIGDTEYVPKFQGKATMTADTSSNTAYLQLSSLTSEDTAVYYCNAGHDYDRGRFPYWGQGTLVTVSAA";
 const VL = "DIVMTQSQKFMSTSVGDRVSITCKASQNVGTAVAWYQQKPGQSPKLMIYSASNRYTGVPDRFTGSGSGTDFTLTISNMQSEDLADYFCQQYSSYPLTFGAGTKLELKR";
@@ -73,4 +78,30 @@ test("invalid input is a structured JavaScript error", () => {
     () => numberSequence("ACDX"),
     (error) => error instanceof AnarcismError && error.code === "INVALID_SEQUENCE",
   );
+});
+
+test("worker pool parses FASTA and preserves the core input limits", () => {
+  assert.deepEqual(
+    parseFasta("\n>one description\r\nACD\r\nEF\r\n>two\nGH\n"),
+    [
+      { id: "one description", sequence: "ACDEF" },
+      { id: "two", sequence: "GH" },
+    ],
+  );
+  assert.throws(
+    () => parseFasta(">empty\n\n>next\nACD\n"),
+    (error) => error.code === "INVALID_FASTA" && error.inputId === "empty",
+  );
+  const tooMany = Array.from({ length: 1_001 }, (_, index) => `>s${index}\nA\n`).join("");
+  assert.throws(
+    () => parseFasta(tooMany),
+    (error) => error.code === "BATCH_TOO_LARGE",
+  );
+});
+
+test("worker pool uses a bounded hardware-aware default", () => {
+  assert.equal(recommendedWorkerCount(64), 8);
+  assert.equal(recommendedWorkerCount(2), 2);
+  assert.equal(normalizeWorkerCount(0), 1);
+  assert.equal(normalizeWorkerCount(100), 16);
 });

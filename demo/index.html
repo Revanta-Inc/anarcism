@@ -76,6 +76,7 @@
       }
       textarea { height: 150px; resize: vertical; word-break: break-all; }
       select[multiple] { height: 110px; font-family: inherit; }
+      .hint { color: var(--muted); font-size: 11px; margin-top: 5px; }
       button {
         background: var(--accent); color: #fff; border: 0; border-radius: 6px;
         padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
@@ -152,7 +153,7 @@
       <h1>anarcism</h1>
       <div class="sub">
         Antibody and TCR variable-domain recognition and IMGT numbering, running
-        in a dedicated worker. Sequences never leave this tab.
+        in a configurable pool of dedicated workers. Sequences never leave this tab.
       </div>
     </header>
 
@@ -179,6 +180,12 @@
         <label for="minscore">Minimum bit score</label>
         <input type="number" id="minscore" value="80" step="1" min="0" />
 
+        <label for="workers">Batch workers</label>
+        <input type="number" id="workers" value="4" step="1" min="1" max="16" disabled />
+        <div class="hint">
+          Extra workers start lazily for FASTA batches; a single sequence uses one worker.
+        </div>
+
         <label>Options</label>
         <div class="checks">
           <label><input type="checkbox" id="germline" /> Assign germline</label>
@@ -190,7 +197,8 @@
         </div>
 
         <div class="stats">
-          <span>init <b id="t-init">—</b></span>
+          <span>pool ready <b id="t-init">—</b></span>
+          <span>workers ready/max <b id="t-workers">—</b></span>
           <span>last run <b id="t-run">—</b></span>
           <span>per seq <b id="t-per">—</b></span>
           <span>v<b id="ver">—</b></span>
@@ -203,6 +211,14 @@
     </div>
 
     <script type="module">
+      import {
+        AnalysisWorkerPool,
+        MAX_WORKER_COUNT,
+        normalizeWorkerCount,
+        parseFasta,
+        recommendedWorkerCount,
+      } from '../browser/dist/worker-pool.js';
+
       const VH =
         'EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS';
       const VL =
@@ -222,53 +238,19 @@
       const $ = (id) => document.getElementById(id);
       const out = $('out');
       const REGIONS = ['FR1', 'CDR1', 'FR2', 'CDR2', 'FR3', 'CDR3', 'FR4'];
+      const analysisPool = new AnalysisWorkerPool();
+      let configuredWorkerCount = recommendedWorkerCount();
+      $('workers').max = String(MAX_WORKER_COUNT);
+      $('workers').value = String(configuredWorkerCount);
       const workerStarted = performance.now();
-      const analysisWorker = new Worker(new URL('./worker.js', import.meta.url), {
-        type: 'module',
-        name: 'anarcism',
-      });
-      const pendingRequests = new Map();
-      let nextRequestId = 1;
       let ready = false;
-      let resolveInitialization;
-      let rejectInitialization;
-      const initialization = new Promise((resolve, reject) => {
-        resolveInitialization = resolve;
-        rejectInitialization = reject;
-      });
-
-      analysisWorker.addEventListener('message', (event) => {
-        const message = event.data;
-        if (message?.type === 'ready') {
-          resolveInitialization(message);
-          return;
-        }
-        if (message?.type === 'initializationError') {
-          rejectInitialization(asError(message.error));
-          return;
-        }
-
-        const pending = pendingRequests.get(message?.requestId);
-        if (!pending) return;
-        pendingRequests.delete(message.requestId);
-        if (message.type === 'result') pending.resolve(message);
-        else pending.reject(asError(message.error));
-      });
-
-      analysisWorker.addEventListener('error', (event) => {
-        const error = new Error(event.message || 'the analysis worker failed');
-        rejectInitialization(error);
-        for (const pending of pendingRequests.values()) pending.reject(error);
-        pendingRequests.clear();
-        ready = false;
-        setBusy(false);
-      });
 
       // --- init, measured -------------------------------------------------
       try {
-        const metadata = await initialization;
+        const metadata = await analysisPool.initialize(1);
         const initMs = performance.now() - workerStarted;
         $('t-init').textContent = `${initMs.toFixed(1)} ms`;
+        updateWorkerStat();
         $('ver').textContent = metadata.version;
 
         // Populate the pickers from the embedded profile inventory.
@@ -309,6 +291,7 @@
         });
       }
       $('run').addEventListener('click', run);
+      $('workers').addEventListener('change', configureWorkerPool);
       $('seq').addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') run();
       });
@@ -334,7 +317,13 @@
         const t = performance.now();
         setBusy(true);
         try {
-          ({ results } = await numberInWorker(text, options()));
+          if (text.startsWith('>')) {
+            const inputs = parseFasta(text);
+            await ensureWorkerCount(Math.min(configuredWorkerCount, inputs.length));
+            results = await analysisPool.numberSequences(inputs, options());
+          } else {
+            results = [await analysisPool.numberSequence(text, options())];
+          }
         } catch (e) {
           // `code` is the stable identifier; the message never contains
           // sequence content, so it is safe to show.
@@ -355,33 +344,56 @@
         render(results);
       }
 
-      function numberInWorker(text, requestOptions) {
-        const requestId = nextRequestId++;
-        return new Promise((resolve, reject) => {
-          pendingRequests.set(requestId, { resolve, reject });
-          analysisWorker.postMessage({
-            type: 'number',
-            requestId,
-            fasta: text.startsWith('>'),
-            text,
-            options: requestOptions,
-          });
-        });
-      }
+      async function configureWorkerPool() {
+        const requested = normalizeWorkerCount($('workers').value, MAX_WORKER_COUNT);
+        configuredWorkerCount = requested;
+        $('workers').value = String(requested);
+        updateWorkerStat();
+        if (requested >= analysisPool.size) return;
 
-      function setBusy(busy) {
-        $('run').disabled = busy || !ready;
-        $('run').textContent = busy ? 'Numbering…' : 'Number';
-        for (const button of document.querySelectorAll('[data-ex]')) {
-          button.disabled = busy || !ready;
+        ready = false;
+        setBusy(true, 'Resizing pool…');
+        const started = performance.now();
+        try {
+          const metadata = await analysisPool.resize(requested);
+          $('t-init').textContent = `${(performance.now() - started).toFixed(1)} ms`;
+          configuredWorkerCount = metadata.workerCount;
+          $('workers').value = String(configuredWorkerCount);
+          ready = true;
+        } catch (error) {
+          configuredWorkerCount = Math.max(analysisPool.size, 1);
+          $('workers').value = String(configuredWorkerCount);
+          ready = analysisPool.size > 0;
+          out.innerHTML = '';
+          const message = document.createElement('div');
+          message.className = 'err';
+          message.textContent = `Worker pool resize failed: ${error.message}`;
+          out.append(message);
+        } finally {
+          updateWorkerStat();
+          setBusy(false);
         }
       }
 
-      function asError(value) {
-        const error = new Error(value?.message ?? 'anarcism failed');
-        error.code = value?.code ?? 'INTERNAL';
-        error.inputId = value?.inputId;
-        return error;
+      async function ensureWorkerCount(workerCount) {
+        if (workerCount <= analysisPool.size) return;
+        const started = performance.now();
+        await analysisPool.resize(workerCount);
+        $('t-init').textContent = `${(performance.now() - started).toFixed(1)} ms`;
+        updateWorkerStat();
+      }
+
+      function updateWorkerStat() {
+        $('t-workers').textContent = `${analysisPool.size} / ${configuredWorkerCount}`;
+      }
+
+      function setBusy(busy, busyText = 'Numbering…') {
+        $('run').disabled = busy || !ready;
+        $('run').textContent = busy ? busyText : 'Number';
+        $('workers').disabled = busy || !ready;
+        for (const button of document.querySelectorAll('[data-ex]')) {
+          button.disabled = busy || !ready;
+        }
       }
 
       // --- rendering ------------------------------------------------------

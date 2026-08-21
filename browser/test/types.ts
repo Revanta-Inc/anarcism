@@ -7,6 +7,11 @@ import init, {
   numberSequences,
   validateAntibodyPair,
 } from "../dist/index.js";
+import {
+  AnarcismWorkerPool,
+  recommendedWorkerCount,
+  type WorkerPoolMetadata,
+} from "../dist/worker-pool.js";
 
 const options = {
   allowedChains: ["H", "K", "L"],
@@ -34,3 +39,10 @@ validateAntibodyPair("ACDEFGHIK", "LMNPQRSTVWY", {
   startMax: 10,
   endMin: 100,
 });
+
+const pool = new AnarcismWorkerPool();
+const poolMetadata: Promise<WorkerPoolMetadata> = pool.initialize(recommendedWorkerCount());
+const pooledBatch = pool.numberSequences([{ id: "one", sequence: "ACDEFGHIK" }], options);
+const pooledFasta = pool.numberFasta(">one\nACDEFGHIK\n", options);
+void [poolMetadata, pooledBatch, pooledFasta];
+pool.terminate();

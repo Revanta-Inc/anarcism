@@ -40,9 +40,13 @@ test("demo initializes and renders an IMGT-numbered domain", async ({ page }) =>
   await page.goto("/demo/");
 
   await expect(page.locator("#run")).toBeEnabled({ timeout: 30_000 });
-  expect(page.workers().map((worker) => worker.url())).toEqual([
-    "http://127.0.0.1:43991/demo/worker.js",
-  ]);
+  const initialWorkerCount = Number(await page.locator("#workers").inputValue());
+  expect(initialWorkerCount).toBeGreaterThanOrEqual(1);
+  expect(page.workers()).toHaveLength(1);
+  expect(page.workers().every((worker) =>
+    worker.url() === "http://127.0.0.1:43991/browser/dist/worker.js"
+  )).toBe(true);
+  await expect(page.locator("#t-workers")).toHaveText(`1 / ${initialWorkerCount}`);
   await expect(page.locator("#ver")).toHaveText("0.1.0");
   await expect(page.locator("#chains input")).toHaveCount(7);
   await expect(page.locator("#species option")).toHaveCount(8);
@@ -55,6 +59,23 @@ test("demo initializes and renders an IMGT-numbered domain", async ({ page }) =>
   await page.locator("#alts").check();
   await page.locator("#run").click();
   await expect(page.locator("details summary")).toHaveText("3 alternative hits");
+
+  const resizedWorkerCount = 2;
+  await page.locator("#workers").fill(String(resizedWorkerCount));
+  await page.locator("#workers").dispatchEvent("change");
+  await expect(page.locator("#t-workers")).toHaveText(`1 / ${resizedWorkerCount}`);
+  await expect(page.locator("#run")).toBeEnabled();
+  expect(page.workers()).toHaveLength(1);
+
+  await page.locator('[data-ex="fasta"]').click();
+  await expect(page.locator(".seqhead")).toHaveCount(3);
+  await expect(page.locator("#t-workers")).toHaveText(`${resizedWorkerCount} / ${resizedWorkerCount}`);
+  await expect.poll(() => page.workers().length).toBe(resizedWorkerCount);
+  await expect(page.locator(".seqhead h2")).toHaveText([
+    "trastuzumab_vh",
+    "trastuzumab_vl",
+    "trastuzumab_scfv",
+  ]);
 
   await page.locator('[data-ex="lys"]').click();
   await expect(page.locator("#out .none")).toHaveText("No variable domain detected.");

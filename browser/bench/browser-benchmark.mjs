@@ -7,6 +7,7 @@ const origin = "http://127.0.0.1:43991";
 const warmupIterations = setting("ANARCISM_BENCH_WARMUP", 3);
 const singleIterations = setting("ANARCISM_BENCH_SINGLE_ITERATIONS", 25);
 const pairCount = setting("ANARCISM_BENCH_PAIR_COUNT", 100);
+const poolWorkerCount = setting("ANARCISM_BENCH_BROWSER_WORKERS", 4);
 const server = spawn(process.execPath, ["test/server.mjs"], { stdio: "ignore" });
 let browser;
 
@@ -62,10 +63,36 @@ try {
     started = performance.now();
     const batch = globalThis.anarcismApi.numberSequences(inputs);
     const batchMs = performance.now() - started;
-    if (batch.length !== inputs.length) throw new Error("WASM returned an incomplete batch");
-    batch.forEach((sequenceResult, index) => {
-      assertSingleDomain(sequenceResult, index % 2 === 0 ? "H" : "K");
-    });
+    assertBatch(batch, inputs.length);
+
+    const { AnarcismWorkerPool } = await import("/browser/dist/worker-pool.js");
+    const pool = new AnarcismWorkerPool();
+    let workerPool;
+    try {
+      started = performance.now();
+      await pool.initialize(config.poolWorkerCount);
+      const poolInitializationMs = performance.now() - started;
+      const poolWarmupInputs = inputs.slice(0, Math.min(inputs.length, config.poolWorkerCount * 2));
+      started = performance.now();
+      await pool.numberSequences(poolWarmupInputs);
+      const poolWarmupMs = performance.now() - started;
+      started = performance.now();
+      const pooledBatch = await pool.numberSequences(inputs);
+      const pooledBatchMs = performance.now() - started;
+      assertBatch(pooledBatch, inputs.length);
+      workerPool = {
+        workers: pool.size,
+        initializationMs: poolInitializationMs,
+        warmupSequenceCount: poolWarmupInputs.length,
+        warmupMs: poolWarmupMs,
+        totalMs: pooledBatchMs,
+        perSequenceMs: pooledBatchMs / inputs.length,
+        sequencesPerSecond: inputs.length * 1_000 / pooledBatchMs,
+        speedup: batchMs / pooledBatchMs,
+      };
+    } finally {
+      pool.terminate();
+    }
     return {
       implementation: "Browser WASM",
       userAgent: navigator.userAgent,
@@ -83,6 +110,7 @@ try {
         perSequenceMs: batchMs / inputs.length,
         sequencesPerSecond: inputs.length * 1_000 / batchMs,
       },
+      workerPool,
     };
 
     function assertSingleDomain(sequenceResult, expectedChain) {
@@ -90,10 +118,19 @@ try {
         throw new Error(`WASM returned the wrong domain for ${expectedChain}`);
       }
     }
+
+    function assertBatch(batchResults, expectedLength) {
+      if (batchResults.length !== expectedLength) {
+        throw new Error("WASM returned an incomplete batch");
+      }
+      batchResults.forEach((sequenceResult, index) => {
+        assertSingleDomain(sequenceResult, index % 2 === 0 ? "H" : "K");
+      });
+    }
   }, [
     "EVQLQQSGAEVVRSGASVKLSCTASGFNIKDYYIHWVKQRPEKGLEWIGWIDPEIGDTEYVPKFQGKATMTADTSSNTAYLQLSSLTSEDTAVYYCNAGHDYDRGRFPYWGQGTLVTVSAA",
     "DIVMTQSQKFMSTSVGDRVSITCKASQNVGTAVAWYQQKPGQSPKLMIYSASNRYTGVPDRFTGSGSGTDFTLTISNMQSEDLADYFCQQYSSYPLTFGAGTKLELKR",
-    { warmupIterations, singleIterations, pairCount },
+    { warmupIterations, singleIterations, pairCount, poolWorkerCount },
   ]);
   console.log(JSON.stringify(result, null, 2));
 } finally {

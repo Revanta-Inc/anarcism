@@ -1,10 +1,10 @@
-import init from "../browser/dist/index.js";
+import init from "./index.js";
 
 const initialization = initialize();
 
 self.addEventListener("message", async (event) => {
   const request = event.data;
-  if (request?.type !== "number") return;
+  if (request?.type !== "number" && request?.type !== "numberBatch") return;
 
   const engine = await initialization;
   if (!engine) {
@@ -21,8 +21,8 @@ self.addEventListener("message", async (event) => {
 
   const started = performance.now();
   try {
-    const results = request.fasta
-      ? engine.numberFasta(request.text, request.options)
+    const results = request.type === "numberBatch"
+      ? engine.numberSequences(request.inputs, request.options)
       : [engine.numberSequence(request.text, request.options)];
     self.postMessage({
       type: "result",

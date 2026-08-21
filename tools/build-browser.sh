@@ -20,6 +20,12 @@ else
   cp "$target_wasm" "$distribution/anarcism.wasm"
   echo "warning: wasm-opt was not found; copied the Rust-optimized artifact" >&2
 fi
-cp browser/src/index.js browser/src/index.d.ts "$distribution/"
+cp \
+  browser/src/index.js \
+  browser/src/index.d.ts \
+  browser/src/worker-pool.js \
+  browser/src/worker-pool.d.ts \
+  browser/src/worker.js \
+  "$distribution/"
 cp THIRD_PARTY_NOTICES.md "$distribution/"
 node tools/size-report.mjs

@@ -7,6 +7,9 @@ const files = [
   "browser/dist/anarcism.wasm",
   "browser/dist/index.js",
   "browser/dist/index.d.ts",
+  "browser/dist/worker-pool.js",
+  "browser/dist/worker-pool.d.ts",
+  "browser/dist/worker.js",
   "browser/dist/THIRD_PARTY_NOTICES.md",
   "browser/package.json",
 ];

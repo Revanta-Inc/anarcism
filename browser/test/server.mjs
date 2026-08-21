@@ -10,8 +10,9 @@ const routes = new Map([
   ["/index.js", resolve(browserRoot, "dist/index.js")],
   ["/anarcism.wasm", resolve(browserRoot, "dist/anarcism.wasm")],
   ["/demo/", resolve(repositoryRoot, "demo/index.html")],
-  ["/demo/worker.js", resolve(repositoryRoot, "demo/worker.js")],
   ["/browser/dist/index.js", resolve(browserRoot, "dist/index.js")],
+  ["/browser/dist/worker-pool.js", resolve(browserRoot, "dist/worker-pool.js")],
+  ["/browser/dist/worker.js", resolve(browserRoot, "dist/worker.js")],
   ["/browser/dist/anarcism.wasm", resolve(browserRoot, "dist/anarcism.wasm")],
 ]);
 const contentTypes = new Map([
