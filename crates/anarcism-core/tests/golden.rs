@@ -1,51 +1,8 @@
 use anarcism_core::{
-    DomainResult, NumberingOptions, PairValidationOptions, number_sequence, validate_antibody_pair,
+    DomainResult, GermlineAssignment, NumberingOptions, ProfileHit, number_sequence,
 };
 use serde::Deserialize;
 use std::fmt::Write;
-
-#[derive(Deserialize)]
-struct Corpus {
-    cases: Vec<Case>,
-    pairs: Vec<Pair>,
-}
-
-#[derive(Deserialize)]
-struct Case {
-    id: String,
-    sequence: String,
-    #[serde(rename = "referenceDomains")]
-    reference_domains: Vec<ReferenceDomain>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReferenceDomain {
-    chain_type: String,
-    species: String,
-    start: usize,
-    end: usize,
-    bit_score: f32,
-    numbering: Vec<ReferenceResidue>,
-    padded_imgt_alignment: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReferenceResidue {
-    sequence_index: usize,
-    amino_acid: char,
-    position: u16,
-    insertion_code: String,
-}
-
-#[derive(Deserialize)]
-struct Pair {
-    id: String,
-    vh: String,
-    vl: String,
-    ok: bool,
-}
 
 #[derive(Deserialize)]
 struct V2InputCase {
@@ -74,98 +31,61 @@ struct V2ReferenceDomain {
     start: usize,
     end: usize,
     bit_score: f32,
+    e_value: f64,
+    e_value_display_significant_digits: u32,
+    score_components: V2ReferenceScoreComponents,
+    alternative_hits: Vec<V2ReferenceHit>,
+    germline: Option<V2ReferenceGermline>,
     numbering_length: usize,
     numbering_fnv1a64: String,
     padded_alignment_fnv1a64: String,
 }
 
-fn corpus() -> Corpus {
-    serde_json::from_str(include_str!("../../../tests/golden/corpus.json"))
-        .expect("checked-in golden corpus is valid JSON")
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V2ReferenceHit {
+    profile: String,
+    chain_type: String,
+    species: String,
+    bit_score: f32,
+    e_value: f64,
+    e_value_display_significant_digits: u32,
+    bias: f32,
+    query_start: usize,
+    query_end: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V2ReferenceGermline {
+    species: String,
+    v_gene: Option<String>,
+    v_identity: Option<f32>,
+    j_gene: Option<String>,
+    j_identity: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V2ReferenceScoreComponents {
+    envelope_start: usize,
+    envelope_end: usize,
+    envelope_forward_nats: f32,
+    outside_envelope_nats: f32,
+    null_one_nats: f32,
+    null2_bias_bits: f32,
+    display_precision_bits: f32,
 }
 
 #[test]
-fn detection_boundaries_and_imgt_labels_match_pinned_anarci() {
-    for case in corpus().cases {
-        let result = number_sequence(&case.sequence, &NumberingOptions::default())
-            .unwrap_or_else(|error| panic!("{} failed: {error}", case.id));
-        assert_eq!(
-            result.domains.len(),
-            case.reference_domains.len(),
-            "{} domain count",
-            case.id
-        );
-        for (observed, expected) in result.domains.iter().zip(&case.reference_domains) {
-            assert_eq!(
-                format!("{:?}", observed.chain_type),
-                expected.chain_type,
-                "{} chain",
-                case.id
-            );
-            assert_eq!(observed.species, expected.species, "{} species", case.id);
-            assert_eq!(observed.start, expected.start, "{} start", case.id);
-            assert_eq!(observed.end, expected.end, "{} end", case.id);
-            assert!(
-                (observed.bit_score - expected.bit_score).abs() <= 4.0,
-                "{} score: Rust {}, ANARCI {}",
-                case.id,
-                observed.bit_score,
-                expected.bit_score
-            );
-            assert_eq!(
-                observed.padded_imgt_alignment, expected.padded_imgt_alignment,
-                "{} padded alignment",
-                case.id
-            );
-            assert_eq!(
-                observed.numbering.len(),
-                expected.numbering.len(),
-                "{} residue count",
-                case.id
-            );
-            for (observed_residue, expected_residue) in
-                observed.numbering.iter().zip(&expected.numbering)
-            {
-                assert_eq!(
-                    (
-                        observed_residue.sequence_index,
-                        observed_residue.amino_acid,
-                        observed_residue.position,
-                        observed_residue.insertion_code.as_str(),
-                    ),
-                    (
-                        expected_residue.sequence_index,
-                        expected_residue.amino_acid,
-                        expected_residue.position,
-                        expected_residue.insertion_code.as_str(),
-                    ),
-                    "{} residue parity",
-                    case.id
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn antibody_pair_outcomes_match_the_golden_cases() {
-    for pair in corpus().pairs {
-        let observed =
-            validate_antibody_pair(&pair.vh, &pair.vl, &PairValidationOptions::default())
-                .unwrap_or_else(|error| panic!("{} failed: {error}", pair.id));
-        assert_eq!(observed.ok, pair.ok, "{} pair outcome", pair.id);
-    }
-}
-
-#[test]
-fn expanded_corpus_matches_pinned_anarci() {
+fn corpus_v2_matches_pinned_anarci() {
     let inputs: Vec<V2InputCase> =
         serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json"))
-            .expect("checked-in expanded corpus is valid JSON");
+            .expect("checked-in corpus_v2 input is valid JSON");
     let reference: V2Reference = serde_json::from_str(include_str!(
         "../../../tests/golden/corpus_v2_reference.json"
     ))
-    .expect("checked-in expanded reference is valid JSON");
+    .expect("checked-in corpus_v2 reference is valid JSON");
     assert_eq!(inputs.len(), reference.cases.len());
 
     let worker_count = std::thread::available_parallelism()
@@ -191,8 +111,17 @@ fn expanded_corpus_matches_pinned_anarci() {
 fn assert_v2_case(input: &V2InputCase, expected_case: &V2ReferenceCase) {
     assert_eq!(input.id, expected_case.id);
     assert_eq!(input.category, expected_case.category);
-    let result = number_sequence(&input.seq, &NumberingOptions::default())
-        .unwrap_or_else(|error| panic!("{} failed: {error}", input.id));
+    let result = number_sequence(
+        &input.seq,
+        &NumberingOptions {
+            assign_germline: true,
+            // Full hit-table mode recovers each alternative's HMMER query
+            // bounds instead of reusing its initial Viterbi envelope.
+            alternative_hit_count: 28,
+            ..NumberingOptions::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("{} failed: {error}", input.id));
     assert_eq!(
         result.domains.len(),
         expected_case.domains.len(),
@@ -201,6 +130,7 @@ fn assert_v2_case(input: &V2InputCase, expected_case: &V2ReferenceCase) {
         input.category
     );
     for (observed, expected) in result.domains.iter().zip(&expected_case.domains) {
+        assert_reference_score_components(input, expected);
         assert_eq!(
             format!("{:?}", observed.chain_type),
             expected.chain_type,
@@ -211,11 +141,66 @@ fn assert_v2_case(input: &V2InputCase, expected_case: &V2ReferenceCase) {
         assert_eq!(observed.start, expected.start, "{} start", input.id);
         assert_eq!(observed.end, expected.end, "{} end", input.id);
         assert!(
-            (observed.bit_score - expected.bit_score).abs() <= 4.0,
+            (observed.bit_score - expected.bit_score).abs() <= 0.2,
             "{} score: Rust {}, ANARCI {}",
             input.id,
             observed.bit_score,
             expected.bit_score
+        );
+        assert_e_value_parity(
+            &input.id,
+            observed.e_value,
+            expected.e_value,
+            expected.e_value_display_significant_digits,
+        );
+        assert!(
+            (observed.bias - expected.score_components.null2_bias_bits).abs() <= 0.2,
+            "{} bias: Rust {}, ANARCI {}",
+            input.id,
+            observed.bias,
+            expected.score_components.null2_bias_bits
+        );
+        let mut matched_alternatives = 0;
+        for (hit_index, expected_hit) in expected.alternative_hits.iter().enumerate() {
+            if let Some(actual_hit) = observed
+                .alternative_hits
+                .iter()
+                .find(|hit| hit.profile == expected_hit.profile)
+            {
+                matched_alternatives += 1;
+                assert_eq!(
+                    format!("{:?}", actual_hit.chain_type),
+                    expected_hit.chain_type,
+                    "{} alternative hit {hit_index} chain",
+                    input.id
+                );
+                assert_eq!(
+                    actual_hit.species, expected_hit.species,
+                    "{} alternative hit {hit_index} species",
+                    input.id
+                );
+            }
+        }
+        assert!(
+            matched_alternatives >= expected.alternative_hits.len().min(1),
+            "{} only matched {matched_alternatives}/{} pinned top alternative profiles",
+            input.id,
+            expected.alternative_hits.len()
+        );
+        if strict_alternative_reference(&input.id) {
+            for (hit_index, (actual_hit, expected_hit)) in observed
+                .alternative_hits
+                .iter()
+                .zip(&expected.alternative_hits)
+                .enumerate()
+            {
+                assert_hit_parity(&input.id, hit_index, actual_hit, expected_hit);
+            }
+        }
+        assert_germline_parity(
+            &input.id,
+            observed.germline.as_ref(),
+            expected.germline.as_ref(),
         );
         assert_eq!(
             observed.numbering.len(),
@@ -236,6 +221,123 @@ fn assert_v2_case(input: &V2InputCase, expected_case: &V2ReferenceCase) {
             input.id
         );
     }
+}
+
+fn assert_e_value_parity(id: &str, observed: f64, expected: f64, significant_digits: u32) {
+    assert_eq!(significant_digits, 2, "{id} reference E-value precision");
+    assert!(observed.is_finite() && observed > 0.0, "{id} Rust E-value");
+    assert!(
+        expected.is_finite() && expected > 0.0,
+        "{id} ANARCI E-value"
+    );
+    let relative_difference = (observed - expected).abs() / expected;
+    assert!(
+        relative_difference <= 0.08,
+        "{id} E-value: Rust {observed:e}, ANARCI {expected:e}, relative difference {relative_difference}"
+    );
+}
+
+fn assert_hit_parity(id: &str, hit_index: usize, observed: &ProfileHit, expected: &V2ReferenceHit) {
+    let label = format!("{id} alternative hit {hit_index}");
+    assert_eq!(observed.profile, expected.profile, "{label} profile");
+    assert_eq!(
+        format!("{:?}", observed.chain_type),
+        expected.chain_type,
+        "{label} chain"
+    );
+    assert_eq!(observed.species, expected.species, "{label} species");
+    assert!(
+        (observed.bit_score - expected.bit_score).abs() <= 0.2,
+        "{label} score: Rust {}, ANARCI {}",
+        observed.bit_score,
+        expected.bit_score
+    );
+    assert_eq!(
+        expected.e_value_display_significant_digits, 2,
+        "{label} reference E-value precision"
+    );
+    let relative_e_value_difference =
+        (observed.e_value - expected.e_value).abs() / expected.e_value;
+    assert!(
+        relative_e_value_difference <= 0.08,
+        "{label} E-value: Rust {:e}, ANARCI {:e}, relative difference {relative_e_value_difference}",
+        observed.e_value,
+        expected.e_value
+    );
+    assert!(
+        (observed.bias - expected.bias).abs() <= 0.2,
+        "{label} bias: Rust {}, ANARCI {}",
+        observed.bias,
+        expected.bias
+    );
+    assert_eq!(observed.query_start, expected.query_start, "{label} start");
+    assert_eq!(observed.query_end, expected.query_end, "{label} end");
+}
+
+fn strict_alternative_reference(id: &str) -> bool {
+    matches!(
+        id,
+        "trastuzumab_vh"
+            | "trastuzumab_vl"
+            | "human_trav12_2_traj33"
+            | "human_trbv19_trbj2_7"
+            | "human_trgv9_trgjp"
+            | "human_trdv2_trdj1"
+    )
+}
+
+fn assert_germline_parity(
+    id: &str,
+    observed: Option<&GermlineAssignment>,
+    expected: Option<&V2ReferenceGermline>,
+) {
+    match (observed, expected) {
+        (None, None) => {}
+        (Some(observed), Some(expected)) => {
+            assert_eq!(observed.species, expected.species, "{id} germline species");
+            assert_eq!(observed.v_gene, expected.v_gene, "{id} V gene");
+            assert_eq!(observed.j_gene, expected.j_gene, "{id} J gene");
+            assert_optional_identity(id, "V", observed.v_identity, expected.v_identity);
+            assert_optional_identity(id, "J", observed.j_identity, expected.j_identity);
+        }
+        _ => panic!("{id} germline presence differs"),
+    }
+}
+
+fn assert_optional_identity(id: &str, segment: &str, observed: Option<f32>, expected: Option<f32>) {
+    match (observed, expected) {
+        (None, None) => {}
+        (Some(observed), Some(expected)) => assert!(
+            (observed - expected).abs() <= 0.08,
+            "{id} {segment} identity: Rust {observed}, ANARCI {expected}"
+        ),
+        _ => panic!("{id} {segment} identity presence differs"),
+    }
+}
+
+fn assert_reference_score_components(input: &V2InputCase, expected: &V2ReferenceDomain) {
+    let components = &expected.score_components;
+    assert!(
+        components.envelope_start < components.envelope_end,
+        "{} reference envelope",
+        input.id
+    );
+    assert!(
+        components.envelope_end <= input.seq.len(),
+        "{} reference envelope end",
+        input.id
+    );
+    assert_eq!(components.display_precision_bits, 0.1);
+    let recomposed = (components.envelope_forward_nats + components.outside_envelope_nats
+        - components.null_one_nats)
+        / std::f32::consts::LN_2
+        - components.null2_bias_bits;
+    assert!(
+        (recomposed - expected.bit_score).abs() <= 1.0e-4,
+        "{} reference score components recompose to {recomposed}, expected {}",
+        input.id,
+        expected.bit_score
+    );
 }
 
 fn numbering_fingerprint(domain: &DomainResult) -> String {

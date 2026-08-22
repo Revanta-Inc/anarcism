@@ -23,6 +23,9 @@ const C: usize = 4;
 const SPECIAL_COUNT: usize = 5;
 
 const LN_2: f32 = std::f32::consts::LN_2;
+const MSV_SCORE_SCALE: f32 = 3.0 / LN_2;
+const MSV_FILTER_P_THRESHOLD: f64 = 0.02;
+const MSV_BASE: u8 = 190;
 // HMMER3's p7_FLogsum discretizes log(1 + exp(-difference)) at
 // 0.001-natural-log intervals over [0, 16). Values at a difference of
 // 15.7 or greater return the larger operand directly.
@@ -65,6 +68,19 @@ pub(crate) struct DomainDefinition {
     pub trace_null2_bias: Option<f32>,
 }
 
+/// Components of HMMER's isolated-domain score, kept in their native units.
+///
+/// Forward, null1, and the outside-envelope adjustment are natural logs;
+/// null2 and the composed domain score are bits.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DomainScoreComponents {
+    pub envelope_forward_nats: f32,
+    pub outside_envelope_nats: f32,
+    pub null_one_nats: f32,
+    pub null2_bias_bits: f32,
+    pub bit_score: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SampleSegment {
     sample_index: usize,
@@ -84,6 +100,82 @@ struct SampleCluster {
 struct TraceEnsemble {
     clusters: Vec<SampleCluster>,
     log_null2_odds: Vec<f32>,
+}
+
+/// HMMER 3.4's limited-precision MSV gate.
+///
+/// The profile asset stores the same one-third-bit emission costs as HMMER's
+/// optimized profile. This two-row recurrence is equivalent to the striped
+/// SIMD filter, including unsigned saturation and its overflow-as-hit behavior.
+/// Residue-major emission bytes let LLVM vectorize the model-state loop.
+/// Profiles that fail this calibrated gate cannot reach ANARCI's
+/// Viterbi/Forward pipeline.
+pub(crate) fn msv_filter_passes(profile: &Profile<'_>, sequence: &[u8]) -> bool {
+    if sequence.is_empty() {
+        return false;
+    }
+    let msv_nats = msv_filter_score(profile, sequence);
+    if !msv_nats.is_finite() {
+        return true;
+    }
+
+    let length = sequence.len() as f32;
+    let null_loop = length / (length + 1.0);
+    // p7_bg_NullOne() promotes the logarithms to double, then stores the
+    // result as float before the pipeline subtracts it from the MSV score.
+    let null_nats =
+        (f64::from(length) * f64::from(null_loop).ln() + (1.0 - f64::from(null_loop)).ln()) as f32;
+    let bit_score = (msv_nats - null_nats) / LN_2;
+    let exponent =
+        (-f64::from(profile.msv_lambda()) * f64::from(bit_score - profile.msv_mu())).exp();
+    let p_value = -(-exponent).exp_m1();
+    p_value <= MSV_FILTER_P_THRESHOLD
+}
+
+fn msv_filter_score(profile: &Profile<'_>, sequence: &[u8]) -> f32 {
+    let model_length = profile.consensus().len();
+    let transition_to_match =
+        msv_unbiased_byte_cost((2.0 / (model_length as f32 * (model_length + 1) as f32)).ln());
+    let transition_to_suffix = msv_unbiased_byte_cost(0.5_f32.ln());
+    let transition_to_begin = msv_unbiased_byte_cost((3.0 / (sequence.len() + 3) as f32).ln());
+    let begin_cost = transition_to_begin.saturating_add(transition_to_match);
+
+    // The compact-format decoder caps profiles at 256 states. Fixed rows avoid
+    // two heap allocations for each profile considered by the gate.
+    let mut previous = [0_u8; 257];
+    let mut current = [0_u8; 257];
+    let mut join = 0_u8;
+    let mut begin = MSV_BASE.saturating_sub(begin_cost);
+    let bias = profile.msv_bias();
+
+    for residue in sequence {
+        let match_costs = profile.msv_match_costs_for_residue(usize::from(*residue));
+        let mut end = 0_u8;
+        for ((destination, source), match_cost) in current[1..]
+            .iter_mut()
+            .zip(&previous[..model_length])
+            .zip(match_costs)
+        {
+            let score = (*source)
+                .max(begin)
+                .saturating_add(bias)
+                .saturating_sub(*match_cost);
+            *destination = score;
+            end = end.max(score);
+        }
+        if end.saturating_add(bias) == u8::MAX {
+            return f32::INFINITY;
+        }
+        join = join.max(end.saturating_sub(transition_to_suffix));
+        begin = MSV_BASE.max(join).saturating_sub(begin_cost);
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    (f32::from(join) - f32::from(transition_to_begin) - f32::from(MSV_BASE)) / MSV_SCORE_SCALE - 3.0
+}
+
+fn msv_unbiased_byte_cost(score: f32) -> u8 {
+    (-(MSV_SCORE_SCALE * score).round()).clamp(0.0, 255.0) as u8
 }
 
 pub(crate) fn viterbi_domains(profile: &Profile<'_>, sequence: &[u8]) -> Vec<RawDomain> {
@@ -355,7 +447,6 @@ fn match_bounds(domain: &RawDomain) -> Option<(usize, usize, u16, u16)> {
 fn trace_null2_odds(profile: &Profile<'_>, domain: &RawDomain) -> [f32; 20] {
     let model_length = profile.consensus().len();
     let mut match_usage = vec![0.0_f32; model_length + 1];
-    let mut insert_usage = 0.0_f32;
     let mut emitted = 0.0_f32;
     for step in &domain.steps {
         if step.sequence_index.is_none() {
@@ -363,8 +454,11 @@ fn trace_null2_odds(profile: &Profile<'_>, domain: &RawDomain) -> [f32; 20] {
         }
         emitted += 1.0;
         match step.state {
-            TraceState::Match => match_usage[usize::from(step.model_position)] += 1.0,
-            TraceState::Insert => insert_usage += 1.0,
+            // HMMER's optimized p7_Null2_ByTrace intentionally bins both
+            // M and I emissions by their model node in the striped M vector.
+            TraceState::Match | TraceState::Insert => {
+                match_usage[usize::from(step.model_position)] += 1.0;
+            }
             TraceState::Delete => {}
         }
     }
@@ -373,7 +467,7 @@ fn trace_null2_odds(profile: &Profile<'_>, domain: &RawDomain) -> [f32; 20] {
         return odds;
     }
     for (residue, value) in odds.iter_mut().enumerate() {
-        let mut weighted = insert_usage;
+        let mut weighted = 0.0_f32;
         for (model_position, usage) in match_usage.iter().enumerate().skip(1) {
             weighted += usage * profile.match_score(model_position, residue).exp();
         }
@@ -793,17 +887,80 @@ pub(crate) fn domain_bit_score_with_null2(
     sequence: &[u8],
     trace_null2_bias: Option<f32>,
 ) -> f32 {
+    domain_score_components_with_null2(profile, seed, sequence, trace_null2_bias).bit_score
+}
+
+pub(crate) fn domain_score_components_with_null2(
+    profile: &Profile<'_>,
+    seed: &RawDomain,
+    sequence: &[u8],
+    trace_null2_bias: Option<f32>,
+) -> DomainScoreComponents {
+    domain_score_components_and_hit_bounds(profile, seed, sequence, trace_null2_bias, false).0
+}
+
+pub(crate) fn domain_score_components_with_hit_bounds(
+    profile: &Profile<'_>,
+    seed: &RawDomain,
+    sequence: &[u8],
+    trace_null2_bias: Option<f32>,
+) -> (DomainScoreComponents, Option<(usize, usize)>) {
+    domain_score_components_and_hit_bounds(profile, seed, sequence, trace_null2_bias, true)
+}
+
+fn domain_score_components_and_hit_bounds(
+    profile: &Profile<'_>,
+    seed: &RawDomain,
+    sequence: &[u8],
+    trace_null2_bias: Option<f32>,
+    recover_hit_bounds: bool,
+) -> (DomainScoreComponents, Option<(usize, usize)>) {
     let envelope = &sequence[seed.start..seed.end];
     let forward = ForwardMatrix::fill(profile, envelope, sequence.len());
-    let env_score = forward.score();
-    let null2_bias = trace_null2_bias.unwrap_or_else(|| {
+    let envelope_forward_nats = forward.score();
+    let mut hit_bounds = None;
+    let null2_bias_bits = if let Some(bias) = trace_null2_bias {
+        if recover_hit_bounds {
+            let backward = BackwardMatrix::fill(profile, envelope, sequence.len());
+            let posterior = PosteriorMatrix::decode(profile, &forward, backward);
+            hit_bounds = posterior
+                .optimal_accuracy_trace(profile, seed.start)
+                .map(|alignment| (alignment.start, alignment.end));
+        }
+        bias
+    } else {
         let backward = BackwardMatrix::fill(profile, envelope, sequence.len());
         let posterior = PosteriorMatrix::decode(profile, &forward, backward);
-        posterior.null2_bias_bits(profile, envelope)
-    });
-    let outside_envelope = (sequence.len() - envelope.len()) as f32
+        let bias = posterior.null2_bias_bits(profile, envelope);
+        if recover_hit_bounds {
+            hit_bounds = posterior
+                .optimal_accuracy_trace(profile, seed.start)
+                .map(|alignment| (alignment.start, alignment.end));
+        }
+        bias
+    };
+    let outside_envelope_nats = (sequence.len() - envelope.len()) as f32
         * (sequence.len() as f32 / (sequence.len() as f32 + 3.0)).ln();
-    (env_score + outside_envelope - null_one_score(sequence.len())) / LN_2 - null2_bias
+    let null_one_nats = null_one_score(sequence.len());
+    let bit_score =
+        (envelope_forward_nats + outside_envelope_nats - null_one_nats) / LN_2 - null2_bias_bits;
+    let components = DomainScoreComponents {
+        envelope_forward_nats,
+        outside_envelope_nats,
+        null_one_nats,
+        null2_bias_bits,
+        bit_score,
+    };
+    debug_assert!(
+        (components.bit_score
+            - (components.envelope_forward_nats + components.outside_envelope_nats
+                - components.null_one_nats)
+                / LN_2
+            + components.null2_bias_bits)
+            .abs()
+            <= f32::EPSILON * components.bit_score.abs().max(1.0)
+    );
+    (components, hit_bounds)
 }
 
 /// Replace a Viterbi display with HMMER's posterior optimal-accuracy trace.
@@ -1589,7 +1746,6 @@ impl PosteriorMatrix {
         let overall_score = forward.score();
         let (loop_score, _) = unihit_length_scores_from_move(forward.move_score);
         for sequence_position in 1..=forward.sequence_length {
-            let mut denominator = 0.0_f32;
             for model_position in 1..=forward.model_length {
                 let match_probability = (matrix_cell(
                     &forward.cells,
@@ -1647,7 +1803,6 @@ impl PosteriorMatrix {
                     DELETE,
                     0.0,
                 );
-                denominator += match_probability + insert_probability;
             }
 
             for state in [N, J, C] {
@@ -1662,42 +1817,9 @@ impl PosteriorMatrix {
                     state,
                     probability,
                 );
-                denominator += probability;
             }
             set_special(&mut backward.specials, sequence_position, E, 0.0);
             set_special(&mut backward.specials, sequence_position, B, 0.0);
-
-            if denominator > 0.0 && denominator.is_finite() {
-                let scale = denominator.recip();
-                for model_position in 1..=forward.model_length {
-                    for state in [MATCH, INSERT] {
-                        let probability = matrix_cell(
-                            &backward.cells,
-                            forward.model_length,
-                            sequence_position,
-                            model_position,
-                            state,
-                        );
-                        set_matrix_cell(
-                            &mut backward.cells,
-                            forward.model_length,
-                            sequence_position,
-                            model_position,
-                            state,
-                            probability * scale,
-                        );
-                    }
-                }
-                for state in [N, J, C] {
-                    let probability = special(&backward.specials, sequence_position, state) * scale;
-                    set_special(
-                        &mut backward.specials,
-                        sequence_position,
-                        state,
-                        probability,
-                    );
-                }
-            }
         }
         backward.cells[..(forward.model_length + 1) * STATE_COUNT].fill(0.0);
         backward.specials[..SPECIAL_COUNT].fill(0.0);
@@ -1715,18 +1837,18 @@ impl PosteriorMatrix {
             return 0.0;
         }
         let mut match_usage = vec![0.0_f32; self.model_length + 1];
-        let mut insert_usage = 0.0_f32;
+        let mut insert_usage = vec![0.0_f32; self.model_length + 1];
         let mut flank_usage = 0.0_f32;
         for sequence_position in 1..=self.sequence_length {
-            for (model_position, usage) in match_usage.iter_mut().enumerate().skip(1) {
-                *usage += matrix_cell(
+            for model_position in 1..=self.model_length {
+                match_usage[model_position] += matrix_cell(
                     &self.cells,
                     self.model_length,
                     sequence_position,
                     model_position,
                     MATCH,
                 );
-                insert_usage += matrix_cell(
+                insert_usage[model_position] += matrix_cell(
                     &self.cells,
                     self.model_length,
                     sequence_position,
@@ -1740,13 +1862,28 @@ impl PosteriorMatrix {
                 .sum::<f32>();
         }
         let normalizer = (self.sequence_length as f32).recip();
+        for usage in match_usage.iter_mut().skip(1) {
+            *usage *= normalizer;
+        }
+        for usage in insert_usage.iter_mut().skip(1) {
+            *usage *= normalizer;
+        }
+        flank_usage *= normalizer;
+        let segment_count = self.model_length.div_ceil(4);
         let mut odds = [0.0_f32; 20];
         for (residue, value) in odds.iter_mut().enumerate() {
-            let mut weighted = insert_usage + flank_usage;
-            for (model_position, usage) in match_usage.iter().enumerate().skip(1) {
-                weighted += usage * profile.match_score(model_position, residue).exp();
+            let mut lanes = [0.0_f32; 4];
+            for segment in 0..segment_count {
+                for (lane, lane_sum) in lanes.iter_mut().enumerate() {
+                    let model_position = segment + lane * segment_count + 1;
+                    if model_position <= self.model_length {
+                        *lane_sum += match_usage[model_position]
+                            * profile.match_score(model_position, residue).exp();
+                        *lane_sum += insert_usage[model_position];
+                    }
+                }
             }
-            *value = weighted * normalizer;
+            *value = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]) + flank_usage;
         }
         let correction: f32 = sequence
             .iter()
@@ -2783,6 +2920,21 @@ mod tests {
             .collect()
     }
 
+    fn isolated_score_components(profile_name: &str, sequence: &str) -> DomainScoreComponents {
+        let database = embedded_profiles().unwrap();
+        let profile = database
+            .profiles()
+            .iter()
+            .find(|profile| profile.name() == profile_name)
+            .unwrap();
+        let encoded = encode(sequence);
+        let mut seed = viterbi_domains(profile, &encoded).remove(0);
+        let definition = define_domain(profile, &seed, &encoded);
+        seed.start = definition.start;
+        seed.end = definition.end;
+        domain_score_components_with_null2(profile, &seed, &encoded, definition.trace_null2_bias)
+    }
+
     #[test]
     fn human_heavy_profile_recovers_a_full_domain_trace() {
         let database = embedded_profiles().unwrap();
@@ -2793,6 +2945,101 @@ mod tests {
         assert!(domains[0].start <= 2);
         assert!(domains[0].end >= 115);
         assert!(domain_forward_bit_score(profile, &sequence, sequence.len()) > 100.0);
+    }
+
+    #[test]
+    fn msv_gate_matches_hmmer_3_4_workload_pass_counts() {
+        let expected = [
+            ("trastuzumab_vh", 29),
+            ("trastuzumab_vl", 29),
+            ("human_trav12_2_traj33", 29),
+            ("human_trbv19_trbj2_7", 29),
+            ("human_trgv9_trgjp", 29),
+            ("human_trdv2_trdj1", 29),
+            ("longcdr3_cow_ultralong", 29),
+            ("scfv_trastuzumab_vh_vl", 29),
+            ("md_bite_pembro_okt3", 29),
+            ("pdb_1hzh_h", 28),
+            ("beta2microglobulin_human", 3),
+            ("myoglobin_tandem_x8", 0),
+        ];
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json")).unwrap();
+        let cases = corpus.as_array().unwrap();
+        let database = embedded_profiles().unwrap();
+
+        for (id, expected_count) in expected {
+            let case = cases
+                .iter()
+                .find(|case| case["id"].as_str() == Some(id))
+                .unwrap();
+            let sequence = encode(case["seq"].as_str().unwrap());
+            let observed = database
+                .profiles()
+                .iter()
+                .filter(|profile| msv_filter_passes(profile, &sequence))
+                .count();
+            assert_eq!(observed, expected_count, "{id}");
+        }
+    }
+
+    #[test]
+    fn isolated_score_components_are_available_for_null2_parity_diagnostics() {
+        let cases = [
+            (
+                "cdr2len_vh_12",
+                "EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARISGSGGSTYYSTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS",
+                191.2_f32,
+                130.379_12_f32,
+                -0.0_f32,
+                -5.824_303_f32,
+                5.3_f32,
+            ),
+            (
+                "pdb_1mel_vhh",
+                "DVQLQASGGGSVQAGGSLRLSCAASGYTIGPYCMGWFRQAPGKEREGVAAINMGGGITYYADSVKGRFTISQDNAKNTVYLLMNSLEPEDTAIYYCAADSTIYASYYECGHGLSTGGYGYDSWGQGTQVTVSSGRYPYDVPDYGSGRA",
+                171.7_f32,
+                118.235_146_f32,
+                -0.301_013_f32,
+                -6.000_583_f32,
+                7.1_f32,
+            ),
+        ];
+        for (
+            id,
+            sequence,
+            reference_score,
+            reference_forward,
+            reference_outside,
+            reference_null_one,
+            reference_bias,
+        ) in cases
+        {
+            let components = isolated_score_components("alpaca_H", sequence);
+            assert!(
+                (components.bit_score - reference_score).abs() <= 0.05,
+                "{id} score: {} vs {reference_score}",
+                components.bit_score
+            );
+            assert!(
+                (components.envelope_forward_nats - reference_forward).abs() <= 0.08,
+                "{id} Forward: {} vs {reference_forward}",
+                components.envelope_forward_nats
+            );
+            assert!(
+                (components.outside_envelope_nats - reference_outside).abs() <= 1.0e-5,
+                "{id} outside-envelope contribution"
+            );
+            assert!(
+                (components.null_one_nats - reference_null_one).abs() <= 1.0e-5,
+                "{id} null1 contribution"
+            );
+            assert!(
+                (components.null2_bias_bits - reference_bias).abs() <= 0.05,
+                "{id} null2: {} vs {reference_bias}",
+                components.null2_bias_bits
+            );
+        }
     }
 
     #[test]

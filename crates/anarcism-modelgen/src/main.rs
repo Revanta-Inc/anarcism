@@ -6,9 +6,10 @@ use std::fmt::{self, Display};
 use std::fs;
 use std::path::PathBuf;
 
-const MAGIC: &[u8; 8] = b"ANRCPRF2";
-const FORMAT_VERSION: u16 = 2;
+const MAGIC: &[u8; 8] = b"ANRCPRF3";
+const FORMAT_VERSION: u16 = 3;
 const SCORE_SCALE: f32 = 32_768.0;
+const MSV_SCORE_SCALE: f32 = 3.0 / std::f32::consts::LN_2;
 const MODEL_LENGTH: usize = 128;
 const ALPHABET: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
 const BACKGROUND: [f32; 20] = [
@@ -52,6 +53,8 @@ struct RawProfile {
     name: String,
     length: usize,
     checksum: u32,
+    msv_mu: f32,
+    msv_lambda: f32,
     forward_tau: f32,
     forward_lambda: f32,
     consensus: Vec<u8>,
@@ -113,6 +116,7 @@ fn parse_hmmer3(source: &str) -> Result<Vec<RawProfile>> {
         let mut name = None;
         let mut length = None;
         let mut checksum = 0;
+        let mut msv = None;
         let mut forward = None;
 
         while cursor < lines.len() && !lines[cursor].starts_with("HMM ") {
@@ -127,6 +131,15 @@ fn parse_hmmer3(source: &str) -> Result<Vec<RawProfile>> {
                     .trim()
                     .parse()
                     .map_err(|error| Error(format!("invalid CKSUM {value:?}: {error}")))?;
+            } else if let Some(value) = line.strip_prefix("STATS LOCAL MSV") {
+                let fields: Vec<&str> = value.split_whitespace().collect();
+                if fields.len() != 2 {
+                    return Err(Error(format!("invalid MSV stats line: {line}")));
+                }
+                msv = Some((
+                    parse_f32(fields[0], "MSV mu")?,
+                    parse_f32(fields[1], "MSV lambda")?,
+                ));
             } else if let Some(value) = line.strip_prefix("STATS LOCAL FORWARD") {
                 let fields: Vec<&str> = value.split_whitespace().collect();
                 if fields.len() != 2 {
@@ -146,8 +159,16 @@ fn parse_hmmer3(source: &str) -> Result<Vec<RawProfile>> {
                 "profile {name} has length {length}; expected {MODEL_LENGTH}"
             )));
         }
+        let (msv_mu, msv_lambda) =
+            msv.ok_or_else(|| Error(format!("profile {name} is missing MSV stats")))?;
         let (forward_tau, forward_lambda) =
             forward.ok_or_else(|| Error(format!("profile {name} is missing FORWARD stats")))?;
+        if !msv_mu.is_finite() || !msv_lambda.is_finite() || msv_lambda <= 0.0 {
+            return Err(Error(format!("profile {name} has invalid MSV stats")));
+        }
+        if !forward_tau.is_finite() || !forward_lambda.is_finite() || forward_lambda <= 0.0 {
+            return Err(Error(format!("profile {name} has invalid FORWARD stats")));
+        }
 
         let alphabet_line = lines
             .get(cursor)
@@ -220,6 +241,8 @@ fn parse_hmmer3(source: &str) -> Result<Vec<RawProfile>> {
             name,
             length,
             checksum,
+            msv_mu,
+            msv_lambda,
             forward_tau,
             forward_lambda,
             consensus,
@@ -313,19 +336,29 @@ fn encode(profiles: &[RawProfile]) -> Result<Vec<u8>> {
             b'A' | b'B' | b'G' | b'D'
         )));
         push_u32(&mut output, profile.checksum);
+        output.extend_from_slice(&profile.msv_mu.to_le_bytes());
+        output.extend_from_slice(&profile.msv_lambda.to_le_bytes());
         output.extend_from_slice(&profile.forward_tau.to_le_bytes());
         output.extend_from_slice(&profile.forward_lambda.to_le_bytes());
         output.extend_from_slice(&profile.consensus);
+
+        let match_scores: Vec<[f32; 20]> = profile
+            .match_nlog
+            .iter()
+            .map(|node| std::array::from_fn(|residue| -node[residue] - BACKGROUND[residue].ln()))
+            .collect();
+        let (msv_bias, msv_match_costs) = msv_match_costs(&match_scores);
+        output.push(msv_bias);
+        output.extend_from_slice(&msv_match_costs);
 
         let entries = local_entry_scores(&profile.transitions_nlog, profile.length);
         for score in entries {
             push_i24(&mut output, quantize(score));
         }
 
-        for node in &profile.match_nlog {
-            for (negative_log_probability, background) in node.iter().zip(BACKGROUND) {
-                let score = -*negative_log_probability - background.ln();
-                push_i24(&mut output, quantize(score));
+        for node in &match_scores {
+            for score in node {
+                push_i24(&mut output, quantize(*score));
             }
         }
 
@@ -338,6 +371,41 @@ fn encode(profiles: &[RawProfile]) -> Result<Vec<u8>> {
         }
     }
     Ok(output)
+}
+
+/// Reproduce HMMER 3.4's `mf_conversion()`: one-third-bit unsigned
+/// emission costs for the limited-precision MSV filter.
+fn msv_match_costs(match_scores: &[[f32; 20]]) -> (u8, Vec<u8>) {
+    let maximum = match_scores
+        .iter()
+        .flatten()
+        .copied()
+        .fold(0.0_f32, f32::max);
+    let bias = msv_unbiased_byte_cost(-maximum);
+    // HMMER's optimized profile keeps one contiguous vector per residue.
+    // Using the same residue-major layout lets LLVM vectorize the model-state
+    // recurrence without gathers on native and wasm SIMD targets.
+    let costs = (0..ALPHABET.len())
+        .flat_map(|residue| {
+            match_scores
+                .iter()
+                .map(move |node| msv_biased_byte_cost(node[residue], bias))
+        })
+        .collect();
+    (bias, costs)
+}
+
+fn msv_unbiased_byte_cost(score: f32) -> u8 {
+    let cost = -(MSV_SCORE_SCALE * score).round();
+    cost.clamp(0.0, 255.0) as u8
+}
+
+fn msv_biased_byte_cost(score: f32, bias: u8) -> u8 {
+    if !score.is_finite() {
+        return u8::MAX;
+    }
+    let cost = -(MSV_SCORE_SCALE * score).round() as i32 + i32::from(bias);
+    cost.clamp(0, i32::from(u8::MAX)) as u8
 }
 
 fn local_entry_scores(transitions: &[[f32; 7]], length: usize) -> Vec<f32> {
@@ -422,5 +490,16 @@ mod tests {
             std::str::from_utf8(ALPHABET).unwrap(),
             "ACDEFGHIKLMNPQRSTVWY"
         );
+    }
+
+    #[test]
+    fn msv_byte_costs_use_hmmer_third_bit_rounding_and_bias() {
+        let scores = [[2.0_f32; 20], [-1.0_f32; 20]];
+        let (bias, costs) = msv_match_costs(&scores);
+        assert_eq!(bias, (MSV_SCORE_SCALE * 2.0).round() as u8);
+        assert_eq!(costs[0], 0);
+        assert_eq!(costs[1], bias + MSV_SCORE_SCALE.round() as u8);
+        assert_eq!(costs[2], 0);
+        assert_eq!(msv_biased_byte_cost(f32::NEG_INFINITY, bias), u8::MAX);
     }
 }

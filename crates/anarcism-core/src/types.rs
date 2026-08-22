@@ -113,8 +113,10 @@ pub struct ProfileHit {
     pub chain_type: ChainType,
     pub species: String,
     pub bit_score: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub e_value: Option<f64>,
+    pub e_value: f64,
+    pub bias: f32,
+    pub query_start: usize,
+    pub query_end: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -141,8 +143,10 @@ pub struct DomainResult {
     pub start: usize,
     pub end: usize,
     pub bit_score: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub e_value: Option<f64>,
+    pub e_value: f64,
+    pub bias: f32,
+    pub query_start: usize,
+    pub query_end: usize,
     pub numbering: Vec<NumberedResidue>,
     pub padded_imgt_alignment: String,
     pub alternative_hits: Vec<ProfileHit>,

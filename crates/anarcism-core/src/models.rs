@@ -2,8 +2,8 @@ use std::sync::OnceLock;
 
 use crate::{ChainType, Error, Result};
 
-const MAGIC: &[u8; 8] = b"ANRCPRF2";
-const FORMAT_VERSION: u16 = 2;
+const MAGIC: &[u8; 8] = b"ANRCPRF3";
+const FORMAT_VERSION: u16 = 3;
 const ALPHABET_SIZE: usize = 20;
 const TRANSITION_COUNT: usize = 7;
 
@@ -62,12 +62,19 @@ impl<'a> ProfileDatabase<'a> {
                 return Err(Error::model("profile receptor type does not match chain"));
             }
             let checksum = reader.u32()?;
+            let msv_mu = reader.f32()?;
+            let msv_lambda = reader.f32()?;
             let forward_tau = reader.f32()?;
             let forward_lambda = reader.f32()?;
+            if !msv_mu.is_finite() || !msv_lambda.is_finite() || msv_lambda <= 0.0 {
+                return Err(Error::model("invalid profile MSV calibration"));
+            }
             if !forward_tau.is_finite() || !forward_lambda.is_finite() || forward_lambda <= 0.0 {
                 return Err(Error::model("invalid profile E-value calibration"));
             }
             let consensus = reader.take(model_length)?;
+            let msv_bias = reader.u8()?;
+            let msv_match_costs = reader.take(checked_size(&[model_length, ALPHABET_SIZE])?)?;
             let local_entry = decode_scores(
                 reader.take(checked_size(&[model_length, 3])?)?,
                 inverse_scale,
@@ -85,6 +92,10 @@ impl<'a> ProfileDatabase<'a> {
                 species,
                 chain_type,
                 checksum,
+                msv_mu,
+                msv_lambda,
+                msv_bias,
+                msv_match_costs,
                 forward_tau,
                 forward_lambda,
                 consensus,
@@ -124,6 +135,10 @@ pub struct Profile<'a> {
     species: &'a str,
     chain_type: ChainType,
     checksum: u32,
+    msv_mu: f32,
+    msv_lambda: f32,
+    msv_bias: u8,
+    msv_match_costs: &'a [u8],
     forward_tau: f32,
     forward_lambda: f32,
     consensus: &'a [u8],
@@ -147,6 +162,24 @@ impl Profile<'_> {
 
     pub const fn checksum(&self) -> u32 {
         self.checksum
+    }
+
+    pub const fn msv_mu(&self) -> f32 {
+        self.msv_mu
+    }
+
+    pub const fn msv_lambda(&self) -> f32 {
+        self.msv_lambda
+    }
+
+    pub const fn msv_bias(&self) -> u8 {
+        self.msv_bias
+    }
+
+    #[inline]
+    pub fn msv_match_costs_for_residue(&self, residue_index: usize) -> &[u8] {
+        let start = residue_index * self.consensus.len();
+        &self.msv_match_costs[start..start + self.consensus.len()]
     }
 
     pub const fn forward_tau(&self) -> f32 {

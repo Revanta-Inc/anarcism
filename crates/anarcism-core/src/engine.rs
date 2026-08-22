@@ -4,7 +4,8 @@ use std::num::NonZeroUsize;
 
 use crate::germlines::assign_closest_germline;
 use crate::hmm::{
-    RawDomain, define_domain, domain_bit_score_with_null2, realign_domain, realign_envelope,
+    RawDomain, define_domain, domain_score_components_with_hit_bounds,
+    domain_score_components_with_null2, msv_filter_passes, realign_domain, realign_envelope,
     recover_long_cdr3, trace_emission_score, ungapped_filter_score, viterbi_domains,
 };
 use crate::numbering::number_imgt;
@@ -20,6 +21,9 @@ struct Candidate<'a> {
     profile: &'a Profile<'a>,
     domain: RawDomain,
     bit_score: f32,
+    bias: f32,
+    query_start: usize,
+    query_end: usize,
     ranking_score: f32,
 }
 
@@ -234,10 +238,15 @@ fn number_sequence_with_limits(
     validate_options(options)?;
     let normalized = normalize_sequence(id, sequence, limits)?;
     let database = embedded_profiles()?;
+    // ANARCI runs hmmscan against the complete profile database. HMMER's
+    // independent domain E-value therefore uses the full database size as Z,
+    // even when caller-side chain/species filters restrict returned hits.
+    let e_value_search_space = database.profiles().len();
     let mut ranked_profiles: Vec<(f32, &Profile<'_>)> = database
         .profiles()
         .iter()
         .filter(|profile| profile_is_allowed(profile, options))
+        .filter(|profile| msv_filter_passes(profile, &normalized.encoded))
         .map(|profile| {
             let filter_score = ungapped_filter_score(profile, &normalized.encoded);
             (profile_significance(profile, filter_score), profile)
@@ -271,11 +280,16 @@ fn number_sequence_with_limits(
             if domain.end <= domain.start {
                 continue;
             }
+            let query_start = domain.start;
+            let query_end = domain.end;
             let bit_score = trace_emission_score(profile, &domain, &normalized.encoded);
             candidates.push(Candidate {
                 profile,
                 domain,
                 bit_score,
+                bias: 0.0,
+                query_start,
+                query_end,
                 ranking_score: profile_significance(profile, bit_score),
             });
         }
@@ -290,7 +304,11 @@ fn number_sequence_with_limits(
         // be returned (winner plus requested alternatives) remains exact.
         cluster.truncate(profiles_to_score_per_domain);
         for candidate in &mut cluster {
-            score_defined_domain_candidate(candidate, &normalized.encoded);
+            score_defined_domain_candidate(
+                candidate,
+                &normalized.encoded,
+                options.alternative_hit_count == 28,
+            );
         }
         cluster.sort_by(candidate_order);
         raw_scored_clusters.push(cluster);
@@ -357,7 +375,7 @@ fn number_sequence_with_limits(
             .iter()
             .skip(1)
             .take(options.alternative_hit_count)
-            .map(candidate_hit)
+            .map(|candidate| candidate_hit(candidate, e_value_search_space))
             .collect();
         let germline = if options.assign_germline {
             assign_closest_germline(
@@ -377,10 +395,10 @@ fn number_sequence_with_limits(
             start,
             end,
             bit_score: best.bit_score,
-            // Posterior null2 is included, but fixed-point profile scores and
-            // scalar arithmetic are not bit-identical to optimized HMMER, and
-            // its complete final E-value accounting is outside this subset.
-            e_value: None,
+            e_value: independent_domain_e_value(best.profile, best.bit_score, e_value_search_space),
+            bias: best.bias,
+            query_start: best.query_start,
+            query_end: best.query_end,
             numbering,
             padded_imgt_alignment,
             alternative_hits,
@@ -396,16 +414,38 @@ fn number_sequence_with_limits(
     })
 }
 
-fn score_defined_domain_candidate(candidate: &mut Candidate<'_>, sequence: &[u8]) {
+fn score_defined_domain_candidate(
+    candidate: &mut Candidate<'_>,
+    sequence: &[u8],
+    recover_hit_bounds: bool,
+) {
     let definition = define_domain(candidate.profile, &candidate.domain, sequence);
     candidate.domain.start = definition.start;
     candidate.domain.end = definition.end;
-    candidate.bit_score = domain_bit_score_with_null2(
-        candidate.profile,
-        &candidate.domain,
-        sequence,
-        definition.trace_null2_bias,
-    );
+    let (components, hit_bounds) = if recover_hit_bounds {
+        domain_score_components_with_hit_bounds(
+            candidate.profile,
+            &candidate.domain,
+            sequence,
+            definition.trace_null2_bias,
+        )
+    } else {
+        (
+            domain_score_components_with_null2(
+                candidate.profile,
+                &candidate.domain,
+                sequence,
+                definition.trace_null2_bias,
+            ),
+            None,
+        )
+    };
+    candidate.bit_score = components.bit_score;
+    candidate.bias = components.null2_bias_bits;
+    if let Some((query_start, query_end)) = hit_bounds {
+        candidate.query_start = query_start;
+        candidate.query_end = query_end;
+    }
     candidate.ranking_score = profile_significance(candidate.profile, candidate.bit_score);
 }
 
@@ -524,13 +564,32 @@ fn profile_significance(profile: &Profile<'_>, bit_score: f32) -> f32 {
     profile.forward_lambda() * (bit_score - profile.forward_tau())
 }
 
-fn candidate_hit(candidate: &Candidate<'_>) -> ProfileHit {
+fn independent_domain_e_value(profile: &Profile<'_>, bit_score: f32, search_space: usize) -> f64 {
+    let score = f64::from(bit_score);
+    let tau = f64::from(profile.forward_tau());
+    let lambda = f64::from(profile.forward_lambda());
+    let log_survival = if score < tau {
+        0.0
+    } else {
+        -lambda * (score - tau)
+    };
+    search_space as f64 * log_survival.exp()
+}
+
+fn candidate_hit(candidate: &Candidate<'_>, e_value_search_space: usize) -> ProfileHit {
     ProfileHit {
         profile: candidate.profile.name().to_owned(),
         chain_type: candidate.profile.chain_type(),
         species: candidate.profile.species().to_owned(),
         bit_score: candidate.bit_score,
-        e_value: None,
+        e_value: independent_domain_e_value(
+            candidate.profile,
+            candidate.bit_score,
+            e_value_search_space,
+        ),
+        bias: candidate.bias,
+        query_start: candidate.query_start,
+        query_end: candidate.query_end,
     }
 }
 
@@ -548,6 +607,16 @@ mod tests {
         assert_eq!(vh.domains.len(), 1);
         assert_eq!(vh.domains[0].chain_type, ChainType::H);
         assert_eq!(vh.domains[0].alternative_hits[0].profile, "human_H");
+        assert!(vh.domains[0].e_value.is_finite());
+        assert!(vh.domains[0].e_value > 0.0);
+        assert!(vh.domains[0].bias >= 0.0);
+        assert!(vh.domains[0].query_start < vh.domains[0].query_end);
+        assert!(vh.domains[0].alternative_hits[0].e_value > 0.0);
+        assert!(vh.domains[0].alternative_hits[0].bias >= 0.0);
+        assert!(
+            vh.domains[0].alternative_hits[0].query_start
+                < vh.domains[0].alternative_hits[0].query_end
+        );
         assert_eq!(vh.domains[0].numbering[0].position, 1);
         assert!(vh.domains[0].padded_imgt_alignment.len() >= 120);
 
@@ -568,6 +637,16 @@ mod tests {
         };
         let result = number_sequence(VH, &options).unwrap();
         assert!(result.domains.iter().all(|domain| domain.species == "cow"));
+    }
+
+    #[test]
+    fn antibody_pair_validation_accepts_vh_vl_and_rejects_swapped_chains() {
+        let valid = validate_antibody_pair(VH, VL, &PairValidationOptions::default()).unwrap();
+        assert!(valid.ok);
+
+        let swapped = validate_antibody_pair(VL, VH, &PairValidationOptions::default()).unwrap();
+        assert!(!swapped.ok);
+        assert!(swapped.errors.len() >= 2);
     }
 
     #[test]

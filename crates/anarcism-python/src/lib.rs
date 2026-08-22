@@ -165,7 +165,10 @@ pub struct ProfileHit {
     chain_type: String,
     species: String,
     bit_score: f32,
-    e_value: Option<f64>,
+    e_value: f64,
+    bias: f32,
+    query_start: usize,
+    query_end: usize,
 }
 
 #[pymethods]
@@ -177,6 +180,9 @@ impl ProfileHit {
         dict.set_item("species", &self.species)?;
         dict.set_item("bit_score", self.bit_score)?;
         dict.set_item("e_value", self.e_value)?;
+        dict.set_item("bias", self.bias)?;
+        dict.set_item("query_start", self.query_start)?;
+        dict.set_item("query_end", self.query_end)?;
         Ok(dict)
     }
 
@@ -227,7 +233,10 @@ pub struct DomainResult {
     start: usize,
     end: usize,
     bit_score: f32,
-    e_value: Option<f64>,
+    e_value: f64,
+    bias: f32,
+    query_start: usize,
+    query_end: usize,
     numbering: Vec<Py<NumberedResidue>>,
     padded_imgt_alignment: String,
     alternative_hits: Vec<Py<ProfileHit>>,
@@ -246,6 +255,9 @@ impl DomainResult {
         dict.set_item("end", self.end)?;
         dict.set_item("bit_score", self.bit_score)?;
         dict.set_item("e_value", self.e_value)?;
+        dict.set_item("bias", self.bias)?;
+        dict.set_item("query_start", self.query_start)?;
+        dict.set_item("query_end", self.query_end)?;
         let numbering = self
             .numbering
             .iter()
@@ -369,6 +381,9 @@ fn hit_to_py(py: Python<'_>, value: &CoreHit) -> PyResult<Py<ProfileHit>> {
             species: value.species.clone(),
             bit_score: value.bit_score,
             e_value: value.e_value,
+            bias: value.bias,
+            query_start: value.query_start,
+            query_end: value.query_end,
         },
     )
 }
@@ -412,6 +427,9 @@ fn domain_to_py(py: Python<'_>, value: &CoreDomain) -> PyResult<Py<DomainResult>
             end: value.end,
             bit_score: value.bit_score,
             e_value: value.e_value,
+            bias: value.bias,
+            query_start: value.query_start,
+            query_end: value.query_end,
             numbering,
             padded_imgt_alignment: value.padded_imgt_alignment.clone(),
             alternative_hits,
