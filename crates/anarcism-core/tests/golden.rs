@@ -1,8 +1,12 @@
 use anarcism_core::{
     DomainResult, GermlineAssignment, NumberingOptions, ProfileHit, number_sequence,
 };
+#[cfg(not(target_family = "wasm"))]
+use anarcism_core::{SequenceInput, number_sequences, number_sequences_parallel};
 use serde::Deserialize;
 use std::fmt::Write;
+#[cfg(not(target_family = "wasm"))]
+use std::num::NonZeroUsize;
 
 #[derive(Deserialize)]
 struct V2InputCase {
@@ -106,6 +110,30 @@ fn corpus_v2_matches_pinned_anarci() {
             worker.join().expect("expanded parity worker panicked");
         }
     });
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn full_native_batch_scheduler_matches_the_serial_batch() {
+    let cases: Vec<V2InputCase> =
+        serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json"))
+            .expect("checked-in corpus_v2 input is valid JSON");
+    let inputs: Vec<_> = cases
+        .into_iter()
+        .map(|case| SequenceInput {
+            id: case.id,
+            sequence: case.seq,
+        })
+        .collect();
+    let options = NumberingOptions::default();
+    let serial = number_sequences(&inputs, &options).expect("serial corpus numbering succeeds");
+    let parallel = number_sequences_parallel(
+        &inputs,
+        &options,
+        NonZeroUsize::new(8).expect("worker count is nonzero"),
+    )
+    .expect("parallel corpus numbering succeeds");
+    assert_eq!(parallel, serial);
 }
 
 fn assert_v2_case(input: &V2InputCase, expected_case: &V2ReferenceCase) {

@@ -9,12 +9,25 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum ErrorCode {
     InvalidSequence,
     SequenceTooLong,
-    BatchTooLarge,
     FastaTooLarge,
     InvalidFasta,
     InvalidOptions,
     CorruptModelData,
     Internal,
+}
+
+impl ErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidSequence => "INVALID_SEQUENCE",
+            Self::SequenceTooLong => "SEQUENCE_TOO_LONG",
+            Self::FastaTooLarge => "FASTA_TOO_LARGE",
+            Self::InvalidFasta => "INVALID_FASTA",
+            Self::InvalidOptions => "INVALID_OPTIONS",
+            Self::CorruptModelData => "CORRUPT_MODEL_DATA",
+            Self::Internal => "INTERNAL",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

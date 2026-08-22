@@ -22,5 +22,5 @@ pub use models::{Profile, ProfileDatabase, embedded_profiles};
 pub use types::{
     ChainType, DomainResult, GermlineAssignment, NumberedResidue, NumberingOptions,
     PairValidationOptions, PairValidationResult, ProfileHit, ReceptorType, Region, SequenceInput,
-    SequenceResult, ValidationLimits,
+    SequenceResult,
 };

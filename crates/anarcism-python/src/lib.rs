@@ -11,9 +11,9 @@
 use std::num::NonZeroUsize;
 
 use anarcism_core::{
-    ChainType, DomainResult as CoreDomain, Error, ErrorCode, GermlineAssignment as CoreGermline,
+    ChainType, DomainResult as CoreDomain, Error, GermlineAssignment as CoreGermline,
     NumberedResidue as CoreResidue, NumberingOptions, PairValidationOptions,
-    PairValidationResult as CorePair, ProfileHit as CoreHit, ReceptorType, Region, SequenceInput,
+    PairValidationResult as CorePair, ProfileHit as CoreHit, SequenceInput,
     SequenceResult as CoreSequence, embedded_profiles, number_fasta as core_number_fasta,
     number_sequence_with_id, number_sequences as core_number_sequences,
     number_sequences_parallel as core_number_sequences_parallel,
@@ -32,50 +32,6 @@ create_exception!(
      Carries a stable `code` string and an optional `input_id` naming the record\n\
      that failed."
 );
-
-const fn chain_name(chain: ChainType) -> &'static str {
-    match chain {
-        ChainType::H => "H",
-        ChainType::K => "K",
-        ChainType::L => "L",
-        ChainType::A => "A",
-        ChainType::B => "B",
-        ChainType::G => "G",
-        ChainType::D => "D",
-    }
-}
-
-const fn receptor_name(receptor: ReceptorType) -> &'static str {
-    match receptor {
-        ReceptorType::IG => "IG",
-        ReceptorType::TR => "TR",
-    }
-}
-
-const fn region_name(region: Region) -> &'static str {
-    match region {
-        Region::FR1 => "FR1",
-        Region::CDR1 => "CDR1",
-        Region::FR2 => "FR2",
-        Region::CDR2 => "CDR2",
-        Region::FR3 => "FR3",
-        Region::CDR3 => "CDR3",
-        Region::FR4 => "FR4",
-    }
-}
-
-const fn error_code_name(code: ErrorCode) -> &'static str {
-    match code {
-        ErrorCode::InvalidSequence => "INVALID_SEQUENCE",
-        ErrorCode::SequenceTooLong => "SEQUENCE_TOO_LONG",
-        ErrorCode::BatchTooLarge => "BATCH_TOO_LARGE",
-        ErrorCode::FastaTooLarge => "FASTA_TOO_LARGE",
-        ErrorCode::InvalidFasta => "INVALID_FASTA",
-        ErrorCode::InvalidOptions => "INVALID_OPTIONS",
-        ErrorCode::CorruptModelData => "CORRUPT_MODEL_DATA",
-        ErrorCode::Internal => "INTERNAL",
-    }
-}
 
 fn parse_chain(value: &str) -> PyResult<ChainType> {
     match value.to_ascii_uppercase().as_str() {
@@ -97,7 +53,7 @@ fn to_py_error(py: Python<'_>, error: &Error) -> PyErr {
     let raised = AnarcismError::new_err(error.to_string());
     let value = raised.value(py);
     // A freshly built exception instance always accepts attribute assignment.
-    let _ = value.setattr("code", error_code_name(error.code));
+    let _ = value.setattr("code", error.code.as_str());
     let _ = value.setattr("input_id", error.input_id.clone());
     raised
 }
@@ -367,7 +323,7 @@ fn residue_to_py(py: Python<'_>, value: &CoreResidue) -> PyResult<Py<NumberedRes
             amino_acid: value.amino_acid.to_string(),
             position: value.position,
             insertion_code: value.insertion_code.clone(),
-            region: region_name(value.region).to_owned(),
+            region: value.region.as_str().to_owned(),
         },
     )
 }
@@ -377,7 +333,7 @@ fn hit_to_py(py: Python<'_>, value: &CoreHit) -> PyResult<Py<ProfileHit>> {
         py,
         ProfileHit {
             profile: value.profile.clone(),
-            chain_type: chain_name(value.chain_type).to_owned(),
+            chain_type: value.chain_type.as_str().to_owned(),
             species: value.species.clone(),
             bit_score: value.bit_score,
             e_value: value.e_value,
@@ -420,8 +376,8 @@ fn domain_to_py(py: Python<'_>, value: &CoreDomain) -> PyResult<Py<DomainResult>
         py,
         DomainResult {
             domain_index: value.domain_index,
-            receptor_type: receptor_name(value.receptor_type).to_owned(),
-            chain_type: chain_name(value.chain_type).to_owned(),
+            receptor_type: value.receptor_type.as_str().to_owned(),
+            chain_type: value.chain_type.as_str().to_owned(),
             species: value.species.clone(),
             start: value.start,
             end: value.end,
@@ -664,7 +620,7 @@ fn chains(py: Python<'_>) -> PyResult<Vec<&'static str>> {
     let database = embedded_profiles().map_err(|error| to_py_error(py, &error))?;
     let mut result = Vec::new();
     for profile in database.profiles() {
-        let name = chain_name(profile.chain_type());
+        let name = profile.chain_type().as_str();
         if !result.contains(&name) {
             result.push(name);
         }

@@ -1,6 +1,10 @@
+use std::ops::Range;
 use std::sync::OnceLock;
 
 use crate::Profile;
+
+mod batch;
+pub(crate) use batch::viterbi_filter_bit_scores_batch;
 
 const MATCH: usize = 0;
 const INSERT: usize = 1;
@@ -31,6 +35,7 @@ const MSV_BASE: u8 = 190;
 // 15.7 or greater return the larger operand directly.
 const LOGSUM_SCALE: f32 = 1_000.0;
 const LOGSUM_TABLE_SIZE: usize = 16_000;
+pub(crate) const SEQUENCE_BATCH_LANES: usize = 8;
 static LOGSUM_LOOKUP: OnceLock<Box<[f32]>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -734,160 +739,10 @@ pub(crate) fn ungapped_filter_score(profile: &Profile<'_>, sequence: &[u8]) -> f
     best
 }
 
-/// HMMER3's isolated-domain Forward score, before the null2 composition
-/// correction. Domain envelopes are rescored in local, unihit mode while the
-/// profile and null length models remain configured for the complete target.
-#[cfg(test)]
-pub(crate) fn domain_forward_bit_score(
-    profile: &Profile<'_>,
-    envelope: &[u8],
-    target_length: usize,
-) -> f32 {
-    if envelope.is_empty() || target_length == 0 || envelope.len() > target_length {
-        return f32::NEG_INFINITY;
-    }
-    let model_length = profile.consensus().len();
-    let envelope_length = envelope.len();
-    let (loop_score, move_score) = unihit_length_scores(target_length);
-
-    let mut previous = vec![f32::NEG_INFINITY; (model_length + 1) * STATE_COUNT];
-    let mut current = vec![f32::NEG_INFINITY; (model_length + 1) * STATE_COUNT];
-    let mut previous_special = [f32::NEG_INFINITY; SPECIAL_COUNT];
-    previous_special[N] = 0.0;
-    previous_special[B] = move_score;
-
-    for residue in envelope {
-        current.fill(f32::NEG_INFINITY);
-        let mut special = [f32::NEG_INFINITY; SPECIAL_COUNT];
-
-        for model_position in 1..model_length {
-            let emission = profile.match_score(model_position, usize::from(*residue));
-            let from_match = if model_position > 1 {
-                cell(&previous, model_length, model_position - 1, MATCH)
-                    + profile.transition_score(model_position - 1, MM)
-            } else {
-                f32::NEG_INFINITY
-            };
-            let from_insert = if model_position > 1 {
-                cell(&previous, model_length, model_position - 1, INSERT)
-                    + profile.transition_score(model_position - 1, IM)
-            } else {
-                f32::NEG_INFINITY
-            };
-            let from_delete = if model_position > 1 {
-                cell(&previous, model_length, model_position - 1, DELETE)
-                    + profile.transition_score(model_position - 1, DM)
-            } else {
-                f32::NEG_INFINITY
-            };
-            let from_begin = previous_special[B] + profile.local_entry_score(model_position);
-            let match_score = logsum4(from_match, from_insert, from_begin, from_delete) + emission;
-            set_cell(
-                &mut current,
-                model_length,
-                model_position,
-                MATCH,
-                match_score,
-            );
-
-            let insert_score = logsum(
-                cell(&previous, model_length, model_position, MATCH)
-                    + profile.transition_score(model_position, MI),
-                cell(&previous, model_length, model_position, INSERT)
-                    + profile.transition_score(model_position, II),
-            );
-            set_cell(
-                &mut current,
-                model_length,
-                model_position,
-                INSERT,
-                insert_score,
-            );
-
-            let delete_score = if model_position > 1 {
-                logsum(
-                    cell(&current, model_length, model_position - 1, MATCH)
-                        + profile.transition_score(model_position - 1, MD),
-                    cell(&current, model_length, model_position - 1, DELETE)
-                        + profile.transition_score(model_position - 1, DD),
-                )
-            } else {
-                f32::NEG_INFINITY
-            };
-            set_cell(
-                &mut current,
-                model_length,
-                model_position,
-                DELETE,
-                delete_score,
-            );
-            special[E] = logsum3(special[E], match_score, delete_score);
-        }
-
-        let model_position = model_length;
-        let emission = profile.match_score(model_position, usize::from(*residue));
-        let match_score = logsum4(
-            cell(&previous, model_length, model_position - 1, MATCH)
-                + profile.transition_score(model_position - 1, MM),
-            cell(&previous, model_length, model_position - 1, INSERT)
-                + profile.transition_score(model_position - 1, IM),
-            previous_special[B] + profile.local_entry_score(model_position),
-            cell(&previous, model_length, model_position - 1, DELETE)
-                + profile.transition_score(model_position - 1, DM),
-        ) + emission;
-        set_cell(
-            &mut current,
-            model_length,
-            model_position,
-            MATCH,
-            match_score,
-        );
-        let delete_score = logsum(
-            cell(&current, model_length, model_position - 1, MATCH)
-                + profile.transition_score(model_position - 1, MD),
-            cell(&current, model_length, model_position - 1, DELETE)
-                + profile.transition_score(model_position - 1, DD),
-        );
-        set_cell(
-            &mut current,
-            model_length,
-            model_position,
-            DELETE,
-            delete_score,
-        );
-        special[E] = logsum3(special[E], match_score, delete_score);
-
-        // Isolated envelopes are always rescored in unihit mode: E can only
-        // move to C, and J is unreachable.
-        special[J] = f32::NEG_INFINITY;
-        special[C] = logsum(previous_special[C] + loop_score, special[E]);
-        special[N] = previous_special[N] + loop_score;
-        special[B] = special[N] + move_score;
-
-        std::mem::swap(&mut previous, &mut current);
-        previous_special = special;
-    }
-
-    let raw_score = previous_special[C] + move_score;
-    let null_score = null_one_score(target_length);
-    let outside_envelope = (target_length - envelope_length) as f32
-        * (target_length as f32 / (target_length as f32 + 3.0)).ln();
-    (raw_score + outside_envelope - null_score) / LN_2
-}
-
 /// Rescore one Viterbi envelope using HMMER's isolated-domain workflow:
 /// unihit Forward/Backward and null2 by posterior expectation.
 pub(crate) fn domain_bit_score(profile: &Profile<'_>, seed: &RawDomain, sequence: &[u8]) -> f32 {
-    domain_bit_score_with_null2(profile, seed, sequence, None)
-}
-
-pub(crate) fn domain_bit_score_with_null2(
-    profile: &Profile<'_>,
-    seed: &RawDomain,
-    sequence: &[u8],
-    trace_null2_bias: Option<f32>,
-) -> f32 {
-    domain_score_components_with_null2(profile, seed, sequence, trace_null2_bias).bit_score
+    domain_score_components_with_null2(profile, seed, sequence, None).bit_score
 }
 
 pub(crate) fn domain_score_components_with_null2(
@@ -918,27 +773,26 @@ fn domain_score_components_and_hit_bounds(
     let envelope = &sequence[seed.start..seed.end];
     let forward = ForwardMatrix::fill(profile, envelope, sequence.len());
     let envelope_forward_nats = forward.score();
-    let mut hit_bounds = None;
-    let null2_bias_bits = if let Some(bias) = trace_null2_bias {
-        if recover_hit_bounds {
-            let backward = BackwardMatrix::fill(profile, envelope, sequence.len());
-            let posterior = PosteriorMatrix::decode(profile, &forward, backward);
-            hit_bounds = posterior
-                .optimal_accuracy_trace(profile, seed.start)
-                .map(|alignment| (alignment.start, alignment.end));
-        }
-        bias
-    } else {
+    let posterior = (trace_null2_bias.is_none() || recover_hit_bounds).then(|| {
         let backward = BackwardMatrix::fill(profile, envelope, sequence.len());
-        let posterior = PosteriorMatrix::decode(profile, &forward, backward);
-        let bias = posterior.null2_bias_bits(profile, envelope);
-        if recover_hit_bounds {
-            hit_bounds = posterior
-                .optimal_accuracy_trace(profile, seed.start)
-                .map(|alignment| (alignment.start, alignment.end));
-        }
-        bias
+        PosteriorMatrix::decode(&forward, backward)
+    });
+    let null2_bias_bits = match trace_null2_bias {
+        Some(bias) => bias,
+        None => posterior
+            .as_ref()
+            .expect("null2 scoring requires a posterior matrix")
+            .null2_bias_bits(profile, envelope),
     };
+    let hit_bounds = recover_hit_bounds
+        .then(|| {
+            posterior
+                .as_ref()
+                .expect("hit-bound recovery requires a posterior matrix")
+                .optimal_accuracy_trace(profile, seed.start)
+                .map(|alignment| (alignment.start, alignment.end))
+        })
+        .flatten();
     let outside_envelope_nats = (sequence.len() - envelope.len()) as f32
         * (sequence.len() as f32 / (sequence.len() as f32 + 3.0)).ln();
     let null_one_nats = null_one_score(sequence.len());
@@ -985,15 +839,7 @@ pub(crate) fn realign_domain(
         } else {
             seed.end.saturating_add(20).min(sequence.len())
         };
-    let envelope = &sequence[envelope_start..envelope_end];
-    realign_envelope_slice(
-        profile,
-        seed,
-        sequence,
-        envelope_start,
-        envelope_end,
-        envelope,
-    )
+    realign_envelope_range(profile, seed, sequence, envelope_start..envelope_end)
 }
 
 pub(crate) fn realign_envelope(
@@ -1001,34 +847,25 @@ pub(crate) fn realign_envelope(
     envelope: &RawDomain,
     sequence: &[u8],
 ) -> RawDomain {
-    let envelope_sequence = &sequence[envelope.start..envelope.end];
-    realign_envelope_slice(
-        profile,
-        envelope,
-        sequence,
-        envelope.start,
-        envelope.end,
-        envelope_sequence,
-    )
+    realign_envelope_range(profile, envelope, sequence, envelope.start..envelope.end)
 }
 
-fn realign_envelope_slice(
+fn realign_envelope_range(
     profile: &Profile<'_>,
     fallback: &RawDomain,
     sequence: &[u8],
-    envelope_start: usize,
-    envelope_end: usize,
-    envelope: &[u8],
+    envelope_range: Range<usize>,
 ) -> RawDomain {
+    let envelope = &sequence[envelope_range.clone()];
     let forward = ForwardMatrix::fill(profile, envelope, sequence.len());
     let backward = BackwardMatrix::fill(profile, envelope, sequence.len());
-    let posterior = PosteriorMatrix::decode(profile, &forward, backward);
+    let posterior = PosteriorMatrix::decode(&forward, backward);
     posterior
-        .optimal_accuracy_trace(profile, envelope_start)
+        .optimal_accuracy_trace(profile, envelope_range.start)
         .unwrap_or_else(|| {
             let mut domain = fallback.clone();
-            domain.start = envelope_start;
-            domain.end = envelope_end;
+            domain.start = envelope_range.start;
+            domain.end = envelope_range.end;
             domain
         })
 }
@@ -1738,13 +1575,9 @@ struct PosteriorMatrix {
 }
 
 impl PosteriorMatrix {
-    fn decode(
-        _profile: &Profile<'_>,
-        forward: &ForwardMatrix,
-        mut backward: BackwardMatrix,
-    ) -> Self {
+    fn decode(forward: &ForwardMatrix, mut backward: BackwardMatrix) -> Self {
         let overall_score = forward.score();
-        let (loop_score, _) = unihit_length_scores_from_move(forward.move_score);
+        let loop_score = forward.loop_score;
         for sequence_position in 1..=forward.sequence_length {
             for model_position in 1..=forward.model_length {
                 let match_probability = (matrix_cell(
@@ -1900,11 +1733,6 @@ impl PosteriorMatrix {
         let mut oa = OaMatrix::fill(profile, self);
         oa.trace(profile, self, sequence_offset)
     }
-}
-
-fn unihit_length_scores_from_move(move_score: f32) -> (f32, f32) {
-    let move_probability = move_score.exp();
-    ((1.0 - move_probability).ln(), move_score)
 }
 
 struct OaMatrix {
@@ -2547,6 +2375,11 @@ impl ViterbiMatrix {
         }
     }
 
+    #[cfg(test)]
+    fn score(&self) -> f32 {
+        special(&self.specials, self.sequence_length, C) + self.move_score
+    }
+
     fn trace(&self, profile: &Profile<'_>, sequence: &[u8]) -> Vec<RawDomain> {
         #[derive(Clone, Copy)]
         enum State {
@@ -2783,22 +2616,6 @@ impl ViterbiMatrix {
     }
 }
 
-#[cfg(test)]
-fn cell(row: &[f32], _model_length: usize, model_position: usize, state: usize) -> f32 {
-    row[model_position * STATE_COUNT + state]
-}
-
-#[cfg(test)]
-fn set_cell(
-    row: &mut [f32],
-    _model_length: usize,
-    model_position: usize,
-    state: usize,
-    value: f32,
-) {
-    row[model_position * STATE_COUNT + state] = value;
-}
-
 fn matrix_cell(
     cells: &[f32],
     model_length: usize,
@@ -2885,16 +2702,6 @@ fn logsum_lookup() -> &'static [f32] {
     })
 }
 
-#[cfg(test)]
-fn logsum3(a: f32, b: f32, c: f32) -> f32 {
-    Logsum::shared().three(a, b, c)
-}
-
-#[cfg(test)]
-fn logsum4(a: f32, b: f32, c: f32, d: f32) -> f32 {
-    Logsum::shared().four(a, b, c, d)
-}
-
 fn near(left: f32, right: f32) -> bool {
     if left == right {
         return true;
@@ -2944,7 +2751,9 @@ mod tests {
         assert_eq!(domains.len(), 1);
         assert!(domains[0].start <= 2);
         assert!(domains[0].end >= 115);
-        assert!(domain_forward_bit_score(profile, &sequence, sequence.len()) > 100.0);
+        let forward = ForwardMatrix::fill(profile, &sequence, sequence.len());
+        let bit_score = (forward.score() - null_one_score(sequence.len())) / LN_2;
+        assert!(bit_score > 100.0);
     }
 
     #[test]
@@ -2980,6 +2789,32 @@ mod tests {
                 .filter(|profile| msv_filter_passes(profile, &sequence))
                 .count();
             assert_eq!(observed, expected_count, "{id}");
+        }
+    }
+
+    #[test]
+    fn sequence_major_viterbi_scores_match_full_matrices() {
+        let database = embedded_profiles().unwrap();
+        let profile = &database.profiles()[0];
+        let inputs = [
+            encode(VH),
+            encode(&VH[..100]),
+            encode("ACDEFGHIKLMNPQRSTVWY"),
+            encode(VH),
+            encode(&VH[..100]),
+            encode(VH),
+            encode("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            encode(VH),
+            encode(&VH[..100]),
+        ];
+        let sequences: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+        let observed = viterbi_filter_bit_scores_batch(profile, &sequences);
+
+        for (index, sequence) in sequences.iter().enumerate() {
+            let expected = (ViterbiMatrix::fill(profile, sequence).score()
+                - null_one_score(sequence.len()))
+                / LN_2;
+            assert_eq!(observed[index], expected, "sequence {index}");
         }
     }
 

@@ -29,6 +29,18 @@ impl ChainType {
         }
     }
 
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::H => "H",
+            Self::K => "K",
+            Self::L => "L",
+            Self::A => "A",
+            Self::B => "B",
+            Self::G => "G",
+            Self::D => "D",
+        }
+    }
+
     pub(crate) fn from_byte(value: u8) -> Option<Self> {
         Some(match value {
             b'H' => Self::H,
@@ -47,6 +59,15 @@ impl ChainType {
 pub enum ReceptorType {
     IG,
     TR,
+}
+
+impl ReceptorType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IG => "IG",
+            Self::TR => "TR",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -70,6 +91,18 @@ impl Region {
             66..=104 => Self::FR3,
             105..=117 => Self::CDR3,
             _ => Self::FR4,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FR1 => "FR1",
+            Self::CDR1 => "CDR1",
+            Self::FR2 => "FR2",
+            Self::CDR2 => "CDR2",
+            Self::FR3 => "FR3",
+            Self::CDR3 => "CDR3",
+            Self::FR4 => "FR4",
         }
     }
 }
@@ -169,14 +202,6 @@ pub struct SequenceResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ValidationLimits {
-    pub max_sequence_length: usize,
-    pub max_batch_size: usize,
-    pub max_fasta_bytes: usize,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PairValidationOptions {
@@ -205,14 +230,4 @@ pub struct PairValidationResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vl: Option<DomainResult>,
     pub errors: Vec<String>,
-}
-
-impl Default for ValidationLimits {
-    fn default() -> Self {
-        Self {
-            max_sequence_length: 10_000,
-            max_batch_size: 1_000,
-            max_fasta_bytes: 10 * 1024 * 1024,
-        }
-    }
 }

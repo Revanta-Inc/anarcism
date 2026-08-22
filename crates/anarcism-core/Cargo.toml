@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+wide.workspace = true
 
 [dev-dependencies]
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }

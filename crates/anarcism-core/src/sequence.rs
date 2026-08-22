@@ -1,6 +1,7 @@
-use crate::{Error, ErrorCode, Result, ValidationLimits};
+use crate::{Error, ErrorCode, Result};
 
 pub(crate) const AMINO_ALPHABET: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
+pub(crate) const MAX_SEQUENCE_LENGTH: usize = 10_000;
 
 #[derive(Debug)]
 pub(crate) struct NormalizedSequence {
@@ -9,11 +10,7 @@ pub(crate) struct NormalizedSequence {
     pub warnings: Vec<String>,
 }
 
-pub(crate) fn normalize_sequence(
-    id: &str,
-    input: &str,
-    limits: ValidationLimits,
-) -> Result<NormalizedSequence> {
+pub(crate) fn normalize_sequence(id: &str, input: &str) -> Result<NormalizedSequence> {
     let mut text = String::with_capacity(input.len());
     let mut encoded = Vec::with_capacity(input.len());
     let mut removed_whitespace = false;
@@ -36,12 +33,12 @@ pub(crate) fn normalize_sequence(
                 Some(id),
             )
         })?;
-        if encoded.len() == limits.max_sequence_length {
+        if encoded.len() == MAX_SEQUENCE_LENGTH {
             return Err(Error::sequence(
                 ErrorCode::SequenceTooLong,
                 format!(
                     "sequence exceeds the configured {} residue limit",
-                    limits.max_sequence_length
+                    MAX_SEQUENCE_LENGTH
                 ),
                 Some(id),
             ));
@@ -85,9 +82,9 @@ mod tests {
 
     #[test]
     fn normalizes_case_and_whitespace_without_accepting_ambiguous_residues() {
-        let normalized = normalize_sequence("x", " acd\nEF ", ValidationLimits::default()).unwrap();
+        let normalized = normalize_sequence("x", " acd\nEF ").unwrap();
         assert_eq!(normalized.text, "ACDEF");
         assert_eq!(normalized.warnings.len(), 2);
-        assert!(normalize_sequence("x", "ACX", ValidationLimits::default()).is_err());
+        assert!(normalize_sequence("x", "ACX").is_err());
     }
 }

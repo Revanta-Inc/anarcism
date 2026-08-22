@@ -1,13 +1,15 @@
-use crate::{Error, ErrorCode, Result, SequenceInput, ValidationLimits};
+use crate::{Error, ErrorCode, Result, SequenceInput};
 
-pub(crate) fn parse_fasta(input: &str, limits: ValidationLimits) -> Result<Vec<SequenceInput>> {
-    if input.len() > limits.max_fasta_bytes {
+const MAX_FASTA_BYTES: usize = 10 * 1024 * 1024;
+
+pub(crate) fn parse_fasta(input: &str) -> Result<Vec<SequenceInput>> {
+    if input.len() > MAX_FASTA_BYTES {
         return Err(Error::sequence(
             ErrorCode::FastaTooLarge,
             format!(
                 "FASTA input contains {} bytes; configured limit is {}",
                 input.len(),
-                limits.max_fasta_bytes
+                MAX_FASTA_BYTES
             ),
             None,
         ));
@@ -20,7 +22,7 @@ pub(crate) fn parse_fasta(input: &str, limits: ValidationLimits) -> Result<Vec<S
         let line = raw_line.trim_end_matches('\r');
         if let Some(header) = line.strip_prefix('>') {
             if let Some(id) = current_id.take() {
-                push_record(&mut records, id, &mut current_sequence, limits)?;
+                push_record(&mut records, id, &mut current_sequence)?;
             }
             let id = header.trim();
             if id.is_empty() {
@@ -47,7 +49,7 @@ pub(crate) fn parse_fasta(input: &str, limits: ValidationLimits) -> Result<Vec<S
         }
     }
     if let Some(id) = current_id {
-        push_record(&mut records, id, &mut current_sequence, limits)?;
+        push_record(&mut records, id, &mut current_sequence)?;
     }
     if records.is_empty() {
         return Err(Error::sequence(
@@ -59,22 +61,7 @@ pub(crate) fn parse_fasta(input: &str, limits: ValidationLimits) -> Result<Vec<S
     Ok(records)
 }
 
-fn push_record(
-    records: &mut Vec<SequenceInput>,
-    id: String,
-    sequence: &mut String,
-    limits: ValidationLimits,
-) -> Result<()> {
-    if records.len() == limits.max_batch_size {
-        return Err(Error::sequence(
-            ErrorCode::BatchTooLarge,
-            format!(
-                "FASTA contains more than the configured {} records",
-                limits.max_batch_size
-            ),
-            None,
-        ));
-    }
+fn push_record(records: &mut Vec<SequenceInput>, id: String, sequence: &mut String) -> Result<()> {
     if sequence.is_empty() {
         return Err(Error::sequence(
             ErrorCode::InvalidFasta,
@@ -95,11 +82,7 @@ mod tests {
 
     #[test]
     fn parses_multiline_and_crlf_fasta() {
-        let parsed = parse_fasta(
-            ">one description\r\nACD\r\nEF\r\n>two\nGH\n",
-            Default::default(),
-        )
-        .unwrap();
+        let parsed = parse_fasta(">one description\r\nACD\r\nEF\r\n>two\nGH\n").unwrap();
         assert_eq!(parsed[0].id, "one description");
         assert_eq!(parsed[0].sequence, "ACDEF");
         assert_eq!(parsed[1].sequence, "GH");
@@ -107,7 +90,17 @@ mod tests {
 
     #[test]
     fn rejects_unheaded_and_empty_records() {
-        assert!(parse_fasta("ACD", Default::default()).is_err());
-        assert!(parse_fasta(">empty\n", Default::default()).is_err());
+        assert!(parse_fasta("ACD").is_err());
+        assert!(parse_fasta(">empty\n").is_err());
+    }
+
+    #[test]
+    fn record_count_is_not_limited_by_the_core_parser() {
+        let fasta: String = (0..1_001)
+            .map(|index| format!(">short-{index}\nA\n"))
+            .collect();
+        let parsed = parse_fasta(&fasta).unwrap();
+        assert_eq!(parsed.len(), 1_001);
+        assert_eq!(parsed.last().unwrap().id, "short-1000");
     }
 }

@@ -1,20 +1,29 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(target_family = "wasm"))]
 use std::num::NonZeroUsize;
+#[cfg(not(target_family = "wasm"))]
+use std::sync::Mutex;
 
 use crate::germlines::assign_closest_germline;
 use crate::hmm::{
-    RawDomain, define_domain, domain_score_components_with_hit_bounds,
+    RawDomain, SEQUENCE_BATCH_LANES, define_domain, domain_score_components_with_hit_bounds,
     domain_score_components_with_null2, msv_filter_passes, realign_domain, realign_envelope,
     recover_long_cdr3, trace_emission_score, ungapped_filter_score, viterbi_domains,
+    viterbi_filter_bit_scores_batch,
 };
 use crate::numbering::number_imgt;
-use crate::sequence::normalize_sequence;
+use crate::sequence::{MAX_SEQUENCE_LENGTH, NormalizedSequence, normalize_sequence};
 use crate::{
     ChainType, DomainResult, Error, ErrorCode, NumberingOptions, PairValidationOptions,
-    PairValidationResult, Profile, ProfileHit, Result, SequenceInput, SequenceResult,
-    ValidationLimits, embedded_profiles,
+    PairValidationResult, Profile, ProfileDatabase, ProfileHit, Result, SequenceInput,
+    SequenceResult, embedded_profiles,
 };
+
+const MAX_ALTERNATIVE_HITS: usize = 28;
+const EXACT_PROFILE_RESERVE: usize = 7;
+const MIN_EXACT_PROFILES: usize = 10;
+const BATCH_PROFILE_RESERVE: usize = 4;
+const MIN_BATCH_PROFILES: usize = 7;
 
 #[derive(Debug)]
 struct Candidate<'a> {
@@ -24,7 +33,27 @@ struct Candidate<'a> {
     bias: f32,
     query_start: usize,
     query_end: usize,
-    ranking_score: f32,
+}
+
+impl Candidate<'_> {
+    fn ranking_score(&self) -> f32 {
+        profile_significance(self.profile, self.bit_score)
+    }
+}
+
+#[derive(Debug)]
+struct PreparedRecord<'a> {
+    index: usize,
+    id: &'a str,
+    sequence: NormalizedSequence,
+    profiles: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct ProfileBatchTask {
+    profile_index: usize,
+    sequence_indices: Vec<usize>,
+    work: usize,
 }
 
 pub fn number_sequence(sequence: &str, options: &NumberingOptions) -> Result<SequenceResult> {
@@ -36,15 +65,28 @@ pub fn number_sequence_with_id(
     sequence: &str,
     options: &NumberingOptions,
 ) -> Result<SequenceResult> {
-    number_sequence_with_limits(id, sequence, options, ValidationLimits::default())
+    validate_options(options)?;
+    let normalized = normalize_sequence(id, sequence)?;
+    let database = embedded_profiles()?;
+    number_normalized_sequence(id, normalized, options, database)
 }
 
 pub fn number_sequences(
     inputs: &[SequenceInput],
     options: &NumberingOptions,
 ) -> Result<Vec<SequenceResult>> {
-    let limits = ValidationLimits::default();
-    number_sequences_with_limits(inputs, options, limits)
+    validate_options(options)?;
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let database = embedded_profiles()?;
+    let normalized: Vec<_> = inputs
+        .iter()
+        .map(|input| normalize_sequence(&input.id, &input.sequence))
+        .collect::<Result<_>>()?;
+    let records = prepare_records(inputs, normalized, database, options);
+    number_prepared_records(records, options, database).map(strip_result_indices)
 }
 
 /// Number a native batch concurrently while preserving input order.
@@ -58,45 +100,261 @@ pub fn number_sequences_parallel(
     options: &NumberingOptions,
     worker_count: NonZeroUsize,
 ) -> Result<Vec<SequenceResult>> {
-    let limits = ValidationLimits::default();
-    validate_batch_size(inputs, limits)?;
-    let worker_count = worker_count.get().min(inputs.len());
-    if worker_count <= 1 {
-        return number_sequences_with_limits(inputs, options, limits);
+    validate_options(options)?;
+    if inputs.is_empty() {
+        return Ok(Vec::new());
     }
 
+    let database = embedded_profiles()?;
+    let normalized: Vec<_> = inputs
+        .iter()
+        .map(|input| normalize_sequence(&input.id, &input.sequence))
+        .collect::<Result<_>>()?;
+    let worker_count = worker_count.get().min(inputs.len());
+    if worker_count <= 1 {
+        let records = prepare_records(inputs, normalized, database, options);
+        return number_prepared_records(records, options, database).map(strip_result_indices);
+    }
+
+    let initial_profiles =
+        parallel_initial_profile_indices(database, &normalized, options, worker_count);
+    let mut records = records_with_profiles(inputs, normalized, initial_profiles);
+    if records.len() >= SEQUENCE_BATCH_LANES {
+        let eligible_profiles =
+            parallel_batch_eligible_profile_indices(database, &records, options, worker_count);
+        replace_record_profiles(&mut records, eligible_profiles);
+    }
+    parallel_number_prepared_records(records, options, database, worker_count)
+}
+
+fn prepare_records<'a>(
+    inputs: &'a [SequenceInput],
+    normalized: Vec<NormalizedSequence>,
+    database: &ProfileDatabase<'_>,
+    options: &NumberingOptions,
+) -> Vec<PreparedRecord<'a>> {
+    let profiles = normalized
+        .iter()
+        .map(|sequence| initial_profile_indices(database, sequence, options))
+        .collect();
+    records_with_profiles(inputs, normalized, profiles)
+}
+
+fn records_with_profiles<'a>(
+    inputs: &'a [SequenceInput],
+    normalized: Vec<NormalizedSequence>,
+    profiles: Vec<Vec<usize>>,
+) -> Vec<PreparedRecord<'a>> {
+    inputs
+        .iter()
+        .zip(normalized)
+        .zip(profiles)
+        .enumerate()
+        .map(|(index, ((input, sequence), profiles))| PreparedRecord {
+            index,
+            id: &input.id,
+            sequence,
+            profiles,
+        })
+        .collect()
+}
+
+fn replace_record_profiles(records: &mut [PreparedRecord<'_>], profiles: Vec<Vec<usize>>) {
+    debug_assert_eq!(records.len(), profiles.len());
+    for (record, profiles) in records.iter_mut().zip(profiles) {
+        record.profiles = profiles;
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn parallel_initial_profile_indices(
+    database: &ProfileDatabase<'_>,
+    sequences: &[NormalizedSequence],
+    options: &NumberingOptions,
+    worker_count: usize,
+) -> Vec<Vec<usize>> {
+    let weighted: Vec<_> = sequences
+        .iter()
+        .enumerate()
+        .map(|(index, sequence)| (sequence.encoded.len(), index, index))
+        .collect();
+    let shards = distribute_by_weight(weighted, worker_count);
+
     std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..worker_count)
-            .map(|worker_index| {
-                let start = worker_index * inputs.len() / worker_count;
-                let end = (worker_index + 1) * inputs.len() / worker_count;
-                let chunk = &inputs[start..end];
+        let workers: Vec<_> = shards
+            .into_iter()
+            .filter(|shard| !shard.is_empty())
+            .map(|shard| {
                 scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|input| {
-                            number_sequence_with_limits(&input.id, &input.sequence, options, limits)
+                    shard
+                        .into_iter()
+                        .map(|index| {
+                            (
+                                index,
+                                initial_profile_indices(database, &sequences[index], options),
+                            )
                         })
-                        .collect::<Result<Vec<_>>>()
+                        .collect::<Vec<_>>()
                 })
             })
             .collect();
-        let mut results = Vec::with_capacity(inputs.len());
+        let mut initial: Vec<Option<Vec<usize>>> = (0..sequences.len()).map(|_| None).collect();
+        for worker in workers {
+            let shard = match worker.join() {
+                Ok(shard) => shard,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
+            for (index, profiles) in shard {
+                initial[index] = Some(profiles);
+            }
+        }
+        initial
+            .into_iter()
+            .map(|profiles| profiles.expect("prefilter returns every input exactly once"))
+            .collect()
+    })
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn distribute_by_weight<T>(
+    mut weighted: Vec<(usize, usize, T)>,
+    worker_count: usize,
+) -> Vec<Vec<T>> {
+    if weighted.is_empty() {
+        return Vec::new();
+    }
+    weighted
+        .sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let worker_count = worker_count.min(weighted.len());
+    let mut shards: Vec<Vec<T>> = (0..worker_count).map(|_| Vec::new()).collect();
+    let mut loads = vec![0_usize; worker_count];
+    for (work, _, task) in weighted {
+        let lightest = (0..worker_count)
+            .min_by_key(|worker| (loads[*worker], *worker))
+            .expect("worker count is nonzero");
+        loads[lightest] = loads[lightest].saturating_add(work);
+        shards[lightest].push(task);
+    }
+    shards
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn parallel_batch_eligible_profile_indices(
+    database: &ProfileDatabase<'_>,
+    records: &[PreparedRecord<'_>],
+    options: &NumberingOptions,
+    worker_count: usize,
+) -> Vec<Vec<usize>> {
+    let weighted = profile_batch_tasks(database, records)
+        .into_iter()
+        .map(|task| (task.work, task.profile_index, task))
+        .collect();
+    let shards = distribute_by_weight(weighted, worker_count);
+
+    let rescored = std::thread::scope(|scope| {
+        let workers: Vec<_> = shards
+            .into_iter()
+            .filter(|shard| !shard.is_empty())
+            .map(|shard| {
+                scope.spawn(move || {
+                    let mut scores = Vec::new();
+                    for task in shard {
+                        scores.extend(score_profile_batch_task(database, records, &task));
+                    }
+                    scores
+                })
+            })
+            .collect();
+        let mut rescored: Vec<Vec<(f32, usize)>> = (0..records.len()).map(|_| Vec::new()).collect();
+        for worker in workers {
+            let scores = match worker.join() {
+                Ok(scores) => scores,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
+            for (sequence_index, score, profile_index) in scores {
+                rescored[sequence_index].push((score, profile_index));
+            }
+        }
+        rescored
+    });
+    finish_batch_eligible_profile_indices(database, records, rescored, options)
+}
+
+fn profile_batch_work(
+    profile: &Profile<'_>,
+    records: &[PreparedRecord<'_>],
+    sequence_indices: &[usize],
+) -> usize {
+    let mut counts = BTreeMap::new();
+    for index in sequence_indices {
+        *counts
+            .entry(records[*index].sequence.encoded.len())
+            .or_insert(0_usize) += 1;
+    }
+    counts.into_iter().fold(0_usize, |work, (length, count)| {
+        work.saturating_add(
+            length
+                .saturating_mul(count.div_ceil(SEQUENCE_BATCH_LANES))
+                .saturating_mul(profile.consensus().len()),
+        )
+    })
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn parallel_number_prepared_records(
+    mut records: Vec<PreparedRecord<'_>>,
+    options: &NumberingOptions,
+    database: &ProfileDatabase<'_>,
+    worker_count: usize,
+) -> Result<Vec<SequenceResult>> {
+    records.sort_unstable_by_key(|record| {
+        (
+            record
+                .sequence
+                .encoded
+                .len()
+                .saturating_mul(record.profiles.len().max(1)),
+            record.index,
+        )
+    });
+    let result_count = records.len();
+    let queue = Mutex::new(records);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..worker_count.min(result_count))
+            .map(|_| {
+                scope.spawn(|| -> Result<Vec<(usize, SequenceResult)>> {
+                    let mut results = Vec::new();
+                    loop {
+                        let record = queue.lock().expect("scheduler queue is not poisoned").pop();
+                        let Some(record) = record else {
+                            break;
+                        };
+                        results.push(number_prepared_record(record, options, database)?);
+                    }
+                    Ok(results)
+                })
+            })
+            .collect();
+        let mut results: Vec<Option<SequenceResult>> = (0..result_count).map(|_| None).collect();
         for worker in workers {
             let shard = match worker.join() {
                 Ok(shard) => shard?,
                 Err(payload) => std::panic::resume_unwind(payload),
             };
-            results.extend(shard);
+            for (index, result) in shard {
+                results[index] = Some(result);
+            }
         }
-        Ok(results)
+        Ok(results
+            .into_iter()
+            .map(|result| result.expect("scheduler returns every input exactly once"))
+            .collect())
     })
 }
 
 pub fn number_fasta(fasta: &str, options: &NumberingOptions) -> Result<Vec<SequenceResult>> {
-    let limits = ValidationLimits::default();
-    let inputs = crate::fasta::parse_fasta(fasta, limits)?;
-    number_sequences_with_limits(&inputs, options, limits)
+    let inputs = crate::fasta::parse_fasta(fasta)?;
+    number_sequences(&inputs, options)
 }
 
 pub fn validate_antibody_pair(
@@ -105,8 +363,7 @@ pub fn validate_antibody_pair(
     options: &PairValidationOptions,
 ) -> Result<PairValidationResult> {
     validate_options(&options.numbering)?;
-    let limits = ValidationLimits::default();
-    if options.start_max >= options.end_min || options.end_min > limits.max_sequence_length {
+    if options.start_max >= options.end_min || options.end_min > MAX_SEQUENCE_LENGTH {
         return Err(Error::sequence(
             ErrorCode::InvalidOptions,
             "pair validation requires startMax < endMin within the sequence-length limit",
@@ -130,7 +387,7 @@ pub fn validate_antibody_pair(
     {
         None
     } else {
-        let result = number_sequence_with_limits("vh", vh, &heavy_options, limits)?;
+        let result = number_sequence_with_id("vh", vh, &heavy_options)?;
         single_pair_domain(result.domains)
     };
     let light = if light_options
@@ -140,7 +397,7 @@ pub fn validate_antibody_pair(
     {
         None
     } else {
-        let result = number_sequence_with_limits("vl", vl, &light_options, limits)?;
+        let result = number_sequence_with_id("vl", vl, &light_options)?;
         single_pair_domain(result.domains)
     };
 
@@ -155,31 +412,41 @@ pub fn validate_antibody_pair(
     })
 }
 
-fn number_sequences_with_limits(
-    inputs: &[SequenceInput],
+fn number_prepared_records(
+    mut records: Vec<PreparedRecord<'_>>,
     options: &NumberingOptions,
-    limits: ValidationLimits,
-) -> Result<Vec<SequenceResult>> {
-    validate_batch_size(inputs, limits)?;
-    inputs
-        .iter()
-        .map(|input| number_sequence_with_limits(&input.id, &input.sequence, options, limits))
+    database: &ProfileDatabase<'_>,
+) -> Result<Vec<(usize, SequenceResult)>> {
+    if records.len() >= SEQUENCE_BATCH_LANES {
+        let eligible_profiles = batch_eligible_profile_indices(database, &records, options);
+        replace_record_profiles(&mut records, eligible_profiles);
+    }
+    records
+        .into_iter()
+        .map(|record| number_prepared_record(record, options, database))
         .collect()
 }
 
-fn validate_batch_size(inputs: &[SequenceInput], limits: ValidationLimits) -> Result<()> {
-    if inputs.len() > limits.max_batch_size {
-        return Err(Error::sequence(
-            ErrorCode::BatchTooLarge,
-            format!(
-                "batch contains {} sequences; configured limit is {}",
-                inputs.len(),
-                limits.max_batch_size
-            ),
-            None,
-        ));
-    }
-    Ok(())
+fn number_prepared_record(
+    record: PreparedRecord<'_>,
+    options: &NumberingOptions,
+    database: &ProfileDatabase<'_>,
+) -> Result<(usize, SequenceResult)> {
+    number_normalized_with_profiles(
+        record.id,
+        record.sequence,
+        options,
+        database,
+        record
+            .profiles
+            .into_iter()
+            .map(|profile_index| &database.profiles()[profile_index]),
+    )
+    .map(|result| (record.index, result))
+}
+
+fn strip_result_indices(indexed: Vec<(usize, SequenceResult)>) -> Vec<SequenceResult> {
+    indexed.into_iter().map(|(_, result)| result).collect()
 }
 
 fn intersect_pair_chains(
@@ -229,60 +496,56 @@ fn validate_pair_domain(
     }
 }
 
-fn number_sequence_with_limits(
+fn number_normalized_sequence(
     id: &str,
-    sequence: &str,
+    normalized: NormalizedSequence,
     options: &NumberingOptions,
-    limits: ValidationLimits,
+    database: &ProfileDatabase<'_>,
 ) -> Result<SequenceResult> {
-    validate_options(options)?;
-    let normalized = normalize_sequence(id, sequence, limits)?;
-    let database = embedded_profiles()?;
-    // ANARCI runs hmmscan against the complete profile database. HMMER's
-    // independent domain E-value therefore uses the full database size as Z,
-    // even when caller-side chain/species filters restrict returned hits.
-    let e_value_search_space = database.profiles().len();
-    let mut ranked_profiles: Vec<(f32, &Profile<'_>)> = database
-        .profiles()
-        .iter()
-        .filter(|profile| profile_is_allowed(profile, options))
-        .filter(|profile| msv_filter_passes(profile, &normalized.encoded))
-        .map(|profile| {
-            let filter_score = ungapped_filter_score(profile, &normalized.encoded);
-            (profile_significance(profile, filter_score), profile)
-        })
-        .collect();
-    ranked_profiles.sort_by(|left, right| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.name().cmp(right.1.name()))
-    });
-    let estimated_domains = ((normalized.encoded.len() + 49) / 100).clamp(1, 7);
-    // Keep every species profile for the likely chain family in reach of the
-    // exact Forward pass. Closely related H/K profiles can rank poorly under
-    // an ungapped filter yet win decisively once their indel path is scored.
-    let profiles_to_trace = options
-        .alternative_hit_count
-        .saturating_add(7)
-        .max(10)
-        .saturating_mul(estimated_domains)
-        .min(ranked_profiles.len());
-    let profiles_to_score_per_domain = options.alternative_hit_count.saturating_add(7).max(10);
-    let eligible = ranked_profiles
+    let eligible = initial_profile_indices(database, &normalized, options)
         .into_iter()
-        .take(profiles_to_trace)
-        .map(|(_, profile)| profile);
+        .map(|profile_index| &database.profiles()[profile_index]);
+    number_normalized_with_profiles(id, normalized, options, database, eligible)
+}
+
+fn number_normalized_with_profiles<'a>(
+    id: &str,
+    normalized: NormalizedSequence,
+    options: &NumberingOptions,
+    database: &'a ProfileDatabase<'a>,
+    eligible: impl IntoIterator<Item = &'a Profile<'a>>,
+) -> Result<SequenceResult> {
+    let candidates = collect_candidates(eligible, &normalized.encoded);
+    let scored_clusters = score_candidate_clusters(
+        candidates,
+        &normalized.encoded,
+        exact_profile_budget(options),
+        options.alternative_hit_count == MAX_ALTERNATIVE_HITS,
+        options.min_bit_score,
+    );
+    let domains = render_domains(database, &normalized, options, scored_clusters)?;
+
+    Ok(SequenceResult {
+        id: id.to_owned(),
+        normalized_sequence: normalized.text,
+        domains,
+        warnings: normalized.warnings,
+    })
+}
+
+fn collect_candidates<'a>(
+    eligible: impl IntoIterator<Item = &'a Profile<'a>>,
+    sequence: &[u8],
+) -> Vec<Candidate<'a>> {
     let mut candidates = Vec::new();
     for profile in eligible {
-        let profile_domains = viterbi_domains(profile, &normalized.encoded);
-        for domain in profile_domains.iter().cloned() {
+        for domain in viterbi_domains(profile, sequence) {
             if domain.end <= domain.start {
                 continue;
             }
             let query_start = domain.start;
             let query_end = domain.end;
-            let bit_score = trace_emission_score(profile, &domain, &normalized.encoded);
+            let bit_score = trace_emission_score(profile, &domain, sequence);
             candidates.push(Candidate {
                 profile,
                 domain,
@@ -290,61 +553,68 @@ fn number_sequence_with_limits(
                 bias: 0.0,
                 query_start,
                 query_end,
-                ranking_score: profile_significance(profile, bit_score),
             });
         }
     }
+    candidates
+}
 
-    let clusters = cluster_candidates(candidates);
-    let mut raw_scored_clusters = Vec::with_capacity(clusters.len());
-    for mut cluster in clusters {
-        cluster.sort_by(candidate_order);
-        // Viterbi trace scores eliminate the reserve profile before the
-        // costlier Forward/Backward posterior pass. Every candidate that can
-        // be returned (winner plus requested alternatives) remains exact.
-        cluster.truncate(profiles_to_score_per_domain);
-        for candidate in &mut cluster {
-            score_defined_domain_candidate(
-                candidate,
-                &normalized.encoded,
-                options.alternative_hit_count == 28,
-            );
-        }
-        cluster.sort_by(candidate_order);
-        raw_scored_clusters.push(cluster);
-    }
+fn score_candidate_clusters<'a>(
+    candidates: Vec<Candidate<'a>>,
+    sequence: &[u8],
+    exact_profile_budget: usize,
+    recover_hit_bounds: bool,
+    min_bit_score: f32,
+) -> Vec<Vec<Candidate<'a>>> {
+    let exact_candidates = cluster_candidates(candidates)
+        .into_iter()
+        .flat_map(|mut cluster| {
+            // Viterbi trace scores eliminate the reserve profile before the
+            // costlier Forward/Backward posterior pass. Every candidate that can
+            // be returned (winner plus requested alternatives) remains exact.
+            cluster.truncate(exact_profile_budget);
+            for candidate in &mut cluster {
+                score_defined_domain_candidate(candidate, sequence, recover_hit_bounds);
+            }
+            cluster
+        })
+        .collect();
 
     // Domain definition can expand several short Viterbi seeds onto the same
     // posterior envelope. Recluster those exact envelopes so one biological
     // domain is not reported once for every seed that led to it.
-    let mut raw_scored_clusters =
-        cluster_candidates(raw_scored_clusters.into_iter().flatten().collect());
+    let mut clusters = cluster_candidates(exact_candidates);
 
-    let is_multidomain_target = raw_scored_clusters.len() > 1;
+    let is_multidomain_target = clusters.len() > 1;
     if is_multidomain_target {
         // Optimized HMMER and the scalar browser implementation can differ by
         // a few thousandths in calibrated significance. Within that narrow
         // numerical uncertainty band, prefer the higher domain bit score;
         // this mirrors the optimized ordering at multidomain boundaries.
-        for cluster in &mut raw_scored_clusters {
+        for cluster in &mut clusters {
             cluster.sort_by(multidomain_candidate_order);
         }
     }
 
-    let mut scored_clusters = Vec::with_capacity(raw_scored_clusters.len());
-    for mut cluster in raw_scored_clusters {
-        cluster.retain(|candidate| candidate.bit_score >= options.min_bit_score);
-        if cluster.is_empty() {
-            continue;
-        }
-        if is_multidomain_target {
-            cluster.sort_by(multidomain_candidate_order);
-        } else {
-            cluster.sort_by(candidate_order);
-        }
-        scored_clusters.push(cluster);
-    }
+    clusters
+        .into_iter()
+        .filter_map(|mut cluster| {
+            cluster.retain(|candidate| candidate.bit_score >= min_bit_score);
+            (!cluster.is_empty()).then_some(cluster)
+        })
+        .collect()
+}
 
+fn render_domains(
+    database: &ProfileDatabase<'_>,
+    normalized: &NormalizedSequence,
+    options: &NumberingOptions,
+    scored_clusters: Vec<Vec<Candidate<'_>>>,
+) -> Result<Vec<DomainResult>> {
+    // ANARCI runs hmmscan against the complete profile database. HMMER's
+    // independent domain E-value therefore uses the full database size as Z,
+    // even when caller-side chain/species filters restrict returned hits.
+    let e_value_search_space = database.profiles().len();
     let domain_count = scored_clusters.len();
     let mut domains = Vec::with_capacity(domain_count);
     for (domain_index, cluster) in scored_clusters.into_iter().enumerate() {
@@ -405,13 +675,191 @@ fn number_sequence_with_limits(
             germline,
         });
     }
+    Ok(domains)
+}
 
-    Ok(SequenceResult {
-        id: id.to_owned(),
-        normalized_sequence: normalized.text,
-        domains,
-        warnings: normalized.warnings,
-    })
+fn ranked_profile_indices(
+    database: &ProfileDatabase<'_>,
+    sequence: &[u8],
+    options: &NumberingOptions,
+) -> Vec<(f32, usize)> {
+    let mut ranked_profiles: Vec<_> = database
+        .profiles()
+        .iter()
+        .enumerate()
+        .filter(|(_, profile)| profile_is_allowed(profile, options))
+        .filter(|(_, profile)| msv_filter_passes(profile, sequence))
+        .map(|(profile_index, profile)| {
+            let filter_score = ungapped_filter_score(profile, sequence);
+            (profile_significance(profile, filter_score), profile_index)
+        })
+        .collect();
+    ranked_profiles.sort_by(|left, right| {
+        right.0.total_cmp(&left.0).then_with(|| {
+            database.profiles()[left.1]
+                .name()
+                .cmp(database.profiles()[right.1].name())
+        })
+    });
+    ranked_profiles
+}
+
+fn estimated_domain_count(sequence_length: usize) -> usize {
+    ((sequence_length + 49) / 100).clamp(1, 7)
+}
+
+fn initial_trace_budget(
+    sequence_length: usize,
+    options: &NumberingOptions,
+    available_profiles: usize,
+) -> usize {
+    // Keep every species profile for the likely chain family in reach of the
+    // exact Forward pass. Closely related H/K profiles can rank poorly under
+    // an ungapped filter yet win decisively once their indel path is scored.
+    exact_profile_budget(options)
+        .saturating_mul(estimated_domain_count(sequence_length))
+        .min(available_profiles)
+}
+
+fn exact_profile_budget(options: &NumberingOptions) -> usize {
+    options
+        .alternative_hit_count
+        .saturating_add(EXACT_PROFILE_RESERVE)
+        .max(MIN_EXACT_PROFILES)
+}
+
+fn initial_profile_indices(
+    database: &ProfileDatabase<'_>,
+    sequence: &NormalizedSequence,
+    options: &NumberingOptions,
+) -> Vec<usize> {
+    let ranked = ranked_profile_indices(database, &sequence.encoded, options);
+    let budget = initial_trace_budget(sequence.encoded.len(), options, ranked.len());
+    ranked
+        .into_iter()
+        .take(budget)
+        .map(|(_, profile_index)| profile_index)
+        .collect()
+}
+
+fn batch_trace_budget(
+    sequence_length: usize,
+    options: &NumberingOptions,
+    available_profiles: usize,
+) -> usize {
+    options
+        .alternative_hit_count
+        .saturating_add(BATCH_PROFILE_RESERVE)
+        .max(MIN_BATCH_PROFILES)
+        .saturating_mul(estimated_domain_count(sequence_length))
+        .min(available_profiles)
+}
+
+fn batch_eligible_profile_indices(
+    database: &ProfileDatabase<'_>,
+    records: &[PreparedRecord<'_>],
+    options: &NumberingOptions,
+) -> Vec<Vec<usize>> {
+    let mut rescored: Vec<Vec<(f32, usize)>> = (0..records.len()).map(|_| Vec::new()).collect();
+    for task in profile_batch_tasks(database, records) {
+        for (sequence_index, score, profile_index) in
+            score_profile_batch_task(database, records, &task)
+        {
+            rescored[sequence_index].push((score, profile_index));
+        }
+    }
+
+    finish_batch_eligible_profile_indices(database, records, rescored, options)
+}
+
+fn profile_batch_tasks(
+    database: &ProfileDatabase<'_>,
+    records: &[PreparedRecord<'_>],
+) -> Vec<ProfileBatchTask> {
+    let mut sequences_by_profile = vec![Vec::new(); database.profiles().len()];
+    for (sequence_index, record) in records.iter().enumerate() {
+        if estimated_domain_count(record.sequence.encoded.len()) != 1 {
+            continue;
+        }
+        for &profile_index in &record.profiles {
+            sequences_by_profile[profile_index].push(sequence_index);
+        }
+    }
+
+    sequences_by_profile
+        .into_iter()
+        .enumerate()
+        .filter_map(|(profile_index, sequence_indices)| {
+            if sequence_indices.is_empty() {
+                return None;
+            }
+            let work = profile_batch_work(
+                &database.profiles()[profile_index],
+                records,
+                &sequence_indices,
+            );
+            Some(ProfileBatchTask {
+                profile_index,
+                sequence_indices,
+                work,
+            })
+        })
+        .collect()
+}
+
+fn score_profile_batch_task(
+    database: &ProfileDatabase<'_>,
+    records: &[PreparedRecord<'_>],
+    task: &ProfileBatchTask,
+) -> Vec<(usize, f32, usize)> {
+    let profile = &database.profiles()[task.profile_index];
+    let encoded: Vec<&[u8]> = task
+        .sequence_indices
+        .iter()
+        .map(|index| records[*index].sequence.encoded.as_slice())
+        .collect();
+    task.sequence_indices
+        .iter()
+        .copied()
+        .zip(viterbi_filter_bit_scores_batch(profile, &encoded))
+        .map(|(sequence_index, score)| {
+            (
+                sequence_index,
+                profile_significance(profile, score),
+                task.profile_index,
+            )
+        })
+        .collect()
+}
+
+fn finish_batch_eligible_profile_indices(
+    database: &ProfileDatabase<'_>,
+    records: &[PreparedRecord<'_>],
+    rescored: Vec<Vec<(f32, usize)>>,
+    options: &NumberingOptions,
+) -> Vec<Vec<usize>> {
+    rescored
+        .into_iter()
+        .zip(records)
+        .map(|(mut profiles, record)| {
+            if estimated_domain_count(record.sequence.encoded.len()) > 1 {
+                return record.profiles.clone();
+            }
+            profiles.sort_by(|left, right| {
+                right.0.total_cmp(&left.0).then_with(|| {
+                    database.profiles()[left.1]
+                        .name()
+                        .cmp(database.profiles()[right.1].name())
+                })
+            });
+            let budget = batch_trace_budget(record.sequence.encoded.len(), options, profiles.len());
+            profiles
+                .into_iter()
+                .take(budget)
+                .map(|(_, profile_index)| profile_index)
+                .collect()
+        })
+        .collect()
 }
 
 fn score_defined_domain_candidate(
@@ -446,7 +894,6 @@ fn score_defined_domain_candidate(
         candidate.query_start = query_start;
         candidate.query_end = query_end;
     }
-    candidate.ranking_score = profile_significance(candidate.profile, candidate.bit_score);
 }
 
 fn validate_options(options: &NumberingOptions) -> Result<()> {
@@ -457,10 +904,10 @@ fn validate_options(options: &NumberingOptions) -> Result<()> {
             None,
         ));
     }
-    if options.alternative_hit_count > 28 {
+    if options.alternative_hit_count > MAX_ALTERNATIVE_HITS {
         return Err(Error::sequence(
             ErrorCode::InvalidOptions,
-            "alternativeHitCount cannot exceed 28",
+            format!("alternativeHitCount cannot exceed {MAX_ALTERNATIVE_HITS}"),
             None,
         ));
     }
@@ -544,13 +991,13 @@ fn domains_overlap(left: &Candidate<'_>, right: &Candidate<'_>) -> bool {
 
 fn candidate_order(left: &Candidate<'_>, right: &Candidate<'_>) -> std::cmp::Ordering {
     right
-        .ranking_score
-        .total_cmp(&left.ranking_score)
+        .ranking_score()
+        .total_cmp(&left.ranking_score())
         .then_with(|| left.profile.name().cmp(right.profile.name()))
 }
 
 fn multidomain_candidate_order(left: &Candidate<'_>, right: &Candidate<'_>) -> std::cmp::Ordering {
-    if (left.ranking_score - right.ranking_score).abs() <= 0.01 {
+    if (left.ranking_score() - right.ranking_score()).abs() <= 0.01 {
         right
             .bit_score
             .total_cmp(&left.bit_score)
@@ -673,18 +1120,27 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn parallel_batch_matches_serial_order_and_results() {
-        let inputs = vec![
-            SequenceInput {
-                id: "heavy".into(),
-                sequence: VH.into(),
-            },
-            SequenceInput {
-                id: "light".into(),
-                sequence: VL.into(),
-            },
-        ];
+        let inputs: Vec<_> = (0..8)
+            .flat_map(|index| {
+                [
+                    SequenceInput {
+                        id: format!("heavy-{index}"),
+                        sequence: VH.into(),
+                    },
+                    SequenceInput {
+                        id: format!("light-{index}"),
+                        sequence: VL.into(),
+                    },
+                ]
+            })
+            .collect();
         let options = NumberingOptions::default();
+        let scalar: Vec<_> = inputs
+            .iter()
+            .map(|input| number_sequence_with_id(&input.id, &input.sequence, &options).unwrap())
+            .collect();
         let serial = number_sequences(&inputs, &options).unwrap();
+        assert_eq!(serial, scalar);
         for worker_count in [1, 2, 8] {
             let parallel = number_sequences_parallel(
                 &inputs,
@@ -692,7 +1148,66 @@ mod tests {
                 NonZeroUsize::new(worker_count).unwrap(),
             )
             .unwrap();
-            assert_eq!(parallel, serial);
+            assert_eq!(parallel, scalar);
         }
+
+        let expanded_options = NumberingOptions {
+            alternative_hit_count: 28,
+            assign_germline: true,
+            ..NumberingOptions::default()
+        };
+        let serial = number_sequences(&inputs, &expanded_options).unwrap();
+        let parallel =
+            number_sequences_parallel(&inputs, &expanded_options, NonZeroUsize::new(8).unwrap())
+                .unwrap();
+        assert_eq!(parallel, serial);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_batches_are_not_record_count_limited() {
+        let inputs: Vec<_> = (0..1_001)
+            .map(|index| SequenceInput {
+                id: format!("short-{index}"),
+                sequence: "A".into(),
+            })
+            .collect();
+        let options = NumberingOptions::default();
+        let serial = number_sequences(&inputs, &options).unwrap();
+        let parallel =
+            number_sequences_parallel(&inputs, &options, NonZeroUsize::new(4).unwrap()).unwrap();
+        assert_eq!(serial, parallel);
+        assert_eq!(parallel.len(), inputs.len());
+        assert_eq!(parallel.last().unwrap().id, "short-1000");
+    }
+
+    #[test]
+    fn sequence_major_batch_preserves_marginal_and_multidomain_results() {
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json")).unwrap();
+        let cases = corpus.as_array().unwrap();
+        let selected: Vec<_> = ["cdr1len_vl_00", "scfv_okt3_vl_vh_mouse"]
+            .into_iter()
+            .cycle()
+            .take(8)
+            .enumerate()
+            .map(|(index, id)| {
+                let case = cases
+                    .iter()
+                    .find(|case| case["id"].as_str() == Some(id))
+                    .unwrap();
+                SequenceInput {
+                    id: format!("{id}-{index}"),
+                    sequence: case["seq"].as_str().unwrap().to_owned(),
+                }
+            })
+            .collect();
+        let options = NumberingOptions::default();
+        let scalar: Vec<_> = selected
+            .iter()
+            .map(|input| number_sequence_with_id(&input.id, &input.sequence, &options).unwrap())
+            .collect();
+        let batch = number_sequences(&selected, &options).unwrap();
+        assert_eq!(batch, scalar);
     }
 }
