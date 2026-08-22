@@ -100,15 +100,12 @@ fn main() {
         .collect();
     let expected_domains: usize = reference.cases.iter().map(|case| case.domains.len()).sum();
     let corpus_samples = measure(corpus_iterations, || {
-        let mut observed_domains = 0;
-        for chunk in inputs.chunks(1_000) {
-            let results = number_sequences(chunk, &options).expect("corpus numbering succeeds");
-            observed_domains += results
-                .iter()
-                .map(|result| result.domains.len())
-                .sum::<usize>();
-            black_box(results);
-        }
+        let results = number_sequences(&inputs, &options).expect("corpus numbering succeeds");
+        let observed_domains = results
+            .iter()
+            .map(|result| result.domains.len())
+            .sum::<usize>();
+        black_box(results);
         assert_eq!(observed_domains, expected_domains);
     });
 
@@ -121,6 +118,17 @@ fn main() {
         })
         .collect();
     let logical_cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    let corpus_parallel_workers = NonZeroUsize::new(logical_cpus).expect("worker count is nonzero");
+    let parallel_corpus_samples = measure(corpus_iterations, || {
+        let results = number_sequences_parallel(&inputs, &options, corpus_parallel_workers)
+            .expect("parallel corpus numbering succeeds");
+        let observed_domains = results
+            .iter()
+            .map(|result| result.domains.len())
+            .sum::<usize>();
+        black_box(results);
+        assert_eq!(observed_domains, expected_domains);
+    });
     let scaling: Vec<_> = [1, 2, 4, 8]
         .into_iter()
         .filter(|workers| *workers <= logical_cpus)
@@ -139,6 +147,7 @@ fn main() {
         })
         .collect();
     let corpus_ms = percentile(&corpus_samples, 0.5);
+    let parallel_corpus_ms = percentile(&parallel_corpus_samples, 0.5);
 
     println!(
         "{}",
@@ -155,6 +164,7 @@ fn main() {
             },
             "workloads": workload_results,
             "corpus": throughput(1, corpus_ms, inputs.len()),
+            "parallelCorpus": throughput(logical_cpus, parallel_corpus_ms, inputs.len()),
             "scaling": scaling,
         }))
         .expect("benchmark result serializes")

@@ -3,7 +3,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use anarcism_core::{
-    ChainType, NumberingOptions, SequenceInput, number_sequence, number_sequences,
+    ChainType, NumberingOptions, SequenceInput, number_sequence, number_sequence_with_id,
+    number_sequences,
 };
 use serde_json::json;
 
@@ -37,9 +38,19 @@ fn main() {
             ]
         })
         .collect();
+    let scalar_started = Instant::now();
+    let scalar_batch: Vec<_> = inputs
+        .iter()
+        .map(|input| {
+            number_sequence_with_id(&input.id, &input.sequence, &options)
+                .expect("scalar batch numbering succeeds")
+        })
+        .collect();
+    let scalar_batch_ms = scalar_started.elapsed().as_secs_f64() * 1_000.0;
     let started = Instant::now();
     let batch = number_sequences(&inputs, &options).expect("native batch numbering succeeds");
     let batch_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_eq!(batch, scalar_batch);
     assert_eq!(batch.len(), inputs.len());
     for (index, result) in batch.iter().enumerate() {
         let expected_chain = if index % 2 == 0 {
@@ -64,7 +75,9 @@ fn main() {
             },
             "vh": vh,
             "vl": vl,
+            "scalarBatch": batch_metrics(scalar_batch_ms, inputs.len()),
             "batch": batch_metrics(batch_ms, inputs.len()),
+            "batchSpeedup": scalar_batch_ms / batch_ms,
         }))
         .expect("benchmark result serializes")
     );
