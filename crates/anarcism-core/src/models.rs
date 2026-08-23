@@ -6,12 +6,9 @@ const MAGIC: &[u8; 8] = b"ANRCPRF3";
 const FORMAT_VERSION: u16 = 3;
 const ALPHABET_SIZE: usize = 20;
 const TRANSITION_COUNT: usize = 7;
+pub(crate) const MAX_MODEL_LENGTH: usize = 256;
 
-/// Decodes the embedded profile database once per process and lends it out.
-///
-/// Numbering reads the database for every sequence, so the decode is cached
-/// rather than repeated. The cached value borrows the embedded bytes, which
-/// live for the whole program, so the returned reference is `'static`.
+/// Return the process-wide decoded profile database.
 pub fn embedded_profiles() -> Result<&'static ProfileDatabase<'static>> {
     static DATABASE: OnceLock<Result<ProfileDatabase<'static>>> = OnceLock::new();
     DATABASE
@@ -44,7 +41,7 @@ impl<'a> ProfileDatabase<'a> {
         if profile_count == 0 || model_length == 0 {
             return Err(Error::model("profile database is empty"));
         }
-        if profile_count > 64 || model_length > 256 {
+        if profile_count > 64 || model_length > MAX_MODEL_LENGTH {
             return Err(Error::model(
                 "profile database dimensions exceed format limits",
             ));
@@ -83,6 +80,7 @@ impl<'a> ProfileDatabase<'a> {
                 reader.take(checked_size(&[model_length, ALPHABET_SIZE, 3])?)?,
                 inverse_scale,
             );
+            let match_odds = match_scores.iter().map(|score| score.exp()).collect();
             let transition_scores = decode_scores(
                 reader.take(checked_size(&[model_length - 1, TRANSITION_COUNT, 3])?)?,
                 inverse_scale,
@@ -101,6 +99,7 @@ impl<'a> ProfileDatabase<'a> {
                 consensus,
                 local_entry,
                 match_scores,
+                match_odds,
                 transition_scores,
             });
         }
@@ -144,6 +143,7 @@ pub struct Profile<'a> {
     consensus: &'a [u8],
     local_entry: Box<[f32]>,
     match_scores: Box<[f32]>,
+    match_odds: Box<[f32]>,
     transition_scores: Box<[f32]>,
 }
 
@@ -177,7 +177,7 @@ impl Profile<'_> {
     }
 
     #[inline]
-    pub fn msv_match_costs_for_residue(&self, residue_index: usize) -> &[u8] {
+    pub(crate) fn msv_match_costs_for_residue(&self, residue_index: usize) -> &[u8] {
         let start = residue_index * self.consensus.len();
         &self.msv_match_costs[start..start + self.consensus.len()]
     }
@@ -195,17 +195,17 @@ impl Profile<'_> {
     }
 
     #[inline]
-    pub fn local_entry_score(&self, model_position: usize) -> f32 {
+    pub(crate) fn local_entry_score(&self, model_position: usize) -> f32 {
         self.local_entry[model_position - 1]
     }
 
     #[inline]
-    pub fn match_score(&self, model_position: usize, residue_index: usize) -> f32 {
+    pub(crate) fn match_score(&self, model_position: usize, residue_index: usize) -> f32 {
         self.match_scores[(model_position - 1) * ALPHABET_SIZE + residue_index]
     }
 
     #[inline]
-    pub fn transition_score(&self, model_position: usize, transition: usize) -> f32 {
+    pub(crate) fn transition_score(&self, model_position: usize, transition: usize) -> f32 {
         self.transition_scores[(model_position - 1) * TRANSITION_COUNT + transition]
     }
 
@@ -217,6 +217,13 @@ impl Profile<'_> {
     #[inline]
     pub(crate) fn match_score_rows(&self) -> &[[f32; ALPHABET_SIZE]] {
         let (rows, remainder) = self.match_scores.as_chunks();
+        debug_assert!(remainder.is_empty());
+        rows
+    }
+
+    #[inline]
+    pub(crate) fn match_odds_rows(&self) -> &[[f32; ALPHABET_SIZE]] {
+        let (rows, remainder) = self.match_odds.as_chunks();
         debug_assert!(remainder.is_empty());
         rows
     }

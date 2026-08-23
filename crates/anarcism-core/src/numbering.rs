@@ -12,7 +12,6 @@ pub(crate) fn number_imgt(
     sequence: &[u8],
     domain: &RawDomain,
     chain_type: ChainType,
-    species: &str,
     is_first_domain: bool,
     is_only_domain: bool,
 ) -> (Vec<NumberedResidue>, String, usize, usize) {
@@ -20,7 +19,6 @@ pub(crate) fn number_imgt(
         sequence,
         domain,
         chain_type,
-        species,
         is_first_domain,
         is_only_domain,
     );
@@ -63,8 +61,7 @@ pub(crate) fn number_imgt(
         }
     }
 
-    // ANARCI refuses to assign IMGT labels once CDR3 exceeds the insertion
-    // alphabet it supports, but it still reports the detected domain bounds.
+    // ANARCI reports bounds but no labels beyond its CDR3 insertion alphabet.
     if cdr_indices[2].len() > 117 {
         return (Vec::new(), String::new(), domain.start, domain.end);
     }
@@ -85,24 +82,21 @@ pub(crate) fn number_imgt(
         .max()
         .map_or(start, |index| index + 1);
 
+    let padded_alignment = padded_alignment(sequence, &labelled);
     let numbering = labelled
-        .iter()
+        .into_iter()
         .map(|residue| NumberedResidue {
             sequence_index: residue.sequence_index,
             amino_acid: char::from(sequence[residue.sequence_index]),
             position: residue.position,
-            insertion_code: residue.insertion_code.clone(),
+            insertion_code: residue.insertion_code,
             region: Region::for_imgt_position(residue.position),
         })
         .collect();
-    let padded_alignment = padded_alignment(sequence, &labelled);
     (numbering, padded_alignment, start, end)
 }
 
-/// Resolve the one-state ambiguity immediately outside ANARCI's smoothing
-/// windows. Generic and SIMD HMMER traces can put the same insertion on
-/// opposite sides of a boundary; the neighboring matches identify which
-/// side of the window it belongs to.
+/// Resolve boundary insertions from their neighboring match state.
 fn canonicalize_boundary_insertions(steps: &mut [TraceStep]) {
     let mut index = 0;
     while index < steps.len() {
@@ -140,7 +134,6 @@ fn extend_terminal_steps(
     sequence: &[u8],
     domain: &RawDomain,
     chain_type: ChainType,
-    species: &str,
     is_first_domain: bool,
     is_only_domain: bool,
 ) -> Vec<TraceStep> {
@@ -157,10 +150,7 @@ fn extend_terminal_steps(
         let missing_model_positions = usize::from(first.model_position.saturating_sub(1));
         if missing_model_positions > 0 && missing_model_positions < 5 {
             let first_sequence_index = first.sequence_index.unwrap_or(0);
-            // Port ANARCI's asymmetric N-terminal extension exactly. When
-            // the model starts farther in than the query, only the unmatched
-            // difference is prepended; the remaining query prefix stays
-            // outside the numbered domain.
+            // ANARCI prepends only the unmatched N-terminal difference.
             let extension = if missing_model_positions > first_sequence_index {
                 first_sequence_index.min(missing_model_positions - first_sequence_index)
             } else {
@@ -185,10 +175,7 @@ fn extend_terminal_steps(
             .unwrap_or(last_emitting);
         let last = steps[last_emitting];
         let last_sequence_index = last.sequence_index.unwrap_or(sequence.len());
-        // HMMER's optimal-accuracy display retains a short, J-less CDR3 tail
-        // after the conserved position-104 cysteine while leaving its last two
-        // unsupported query residues outside the numbered domain. Reproduce
-        // that behavior for isolated C-terminal truncations.
+        // Retain a short J-less tail after the position-104 cysteine.
         if last.model_position == 104 && sequence.len() > last_sequence_index + 3 {
             let extension = (sequence.len() - last_sequence_index - 3).min(13);
             let suffix = (1..=extension).map(|offset| TraceStep {
@@ -199,21 +186,31 @@ fn extend_terminal_steps(
             steps.splice(last_emitting + 1..last_emitting + 1, suffix);
         }
 
+        // The pinned K/L/B J germlines end at 127; other families end at 128.
+        let effective_model_end = match chain_type {
+            ChainType::K | ChainType::L | ChainType::B => 127,
+            _ => 128,
+        };
+
+        // Trim state-128 overruns into a following constant region.
+        while let Some(last_emitting) = steps.iter().rposition(|step| step.sequence_index.is_some())
+        {
+            let last = steps[last_emitting];
+            let last_sequence_index = last.sequence_index.unwrap_or(sequence.len());
+            if last.model_position <= effective_model_end
+                || last_sequence_index + 1 >= sequence.len()
+            {
+                break;
+            }
+            steps.remove(last_emitting);
+        }
+
         let last_emitting = steps
             .iter()
             .rposition(|step| step.sequence_index.is_some())
             .unwrap_or(last_emitting);
         let last = steps[last_emitting];
         let last_sequence_index = last.sequence_index.unwrap_or(sequence.len());
-        // ANARCI derives this from the first pinned J germline after
-        // stripping terminal gaps. All kappa/beta and non-human lambda J
-        // sets end at 127; human lambda and the other model families end at
-        // 128.
-        let effective_model_end = match chain_type {
-            ChainType::K | ChainType::B => 127,
-            ChainType::L if species != "human" => 127,
-            _ => 128,
-        };
         if last.model_position > 123
             && last.model_position < effective_model_end
             && last_sequence_index + 1 < sequence.len()
@@ -237,10 +234,7 @@ enum SmoothingRegion {
     Junction(usize),
 }
 
-/// Port of ANARCI's `smooth_insertions()`. HMMER can place an insertion on
-/// either side of a framework/CDR junction when the local paths have nearly
-/// equal accuracy. ANARCI normalizes those small buffers to fixed IMGT state
-/// patterns before it divides the trace into regions.
+/// Normalize framework/CDR boundary insertions with ANARCI's fixed patterns.
 fn smooth_insertions(steps: Vec<TraceStep>) -> Vec<TraceStep> {
     const PATTERNS: [[(u16, TraceState); 4]; 6] = [
         [
@@ -322,8 +316,7 @@ fn smooth_insertions(steps: Vec<TraceStep>) -> Vec<TraceStep> {
         }
     }
 
-    // ANARCI intentionally does not flush a terminal buffer. This is visible
-    // for alignments ending inside one of the junction ranges.
+    // ANARCI leaves a terminal smoothing buffer unnumbered.
     smoothed
 }
 

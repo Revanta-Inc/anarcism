@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod components;
 mod engine;
 mod error;
 mod fasta;

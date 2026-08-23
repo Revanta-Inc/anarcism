@@ -9,10 +9,7 @@ const ALIGNMENT_LENGTH: usize = 128;
 const PACKED_LENGTH: usize = ALIGNMENT_LENGTH * 5 / 8;
 const ALPHABET: &[u8; 21] = b"-ACDEFGHIKLMNPQRSTVWY";
 
-/// Decodes the embedded germline database once per process and lends it out.
-///
-/// Germline assignment reads the database for every domain, so the decode is
-/// cached the same way [`crate::embedded_profiles`] is.
+/// Return the process-wide decoded germline database.
 pub fn embedded_germlines() -> Result<&'static GermlineDatabase<'static>> {
     static DATABASE: OnceLock<Result<GermlineDatabase<'static>>> = OnceLock::new();
     DATABASE
@@ -32,6 +29,7 @@ enum Segment {
 #[derive(Clone, Debug)]
 pub struct GermlineDatabase<'a> {
     germlines: Vec<Germline<'a>>,
+    by_segment_chain: [Vec<usize>; 14],
 }
 
 impl<'a> GermlineDatabase<'a> {
@@ -59,6 +57,7 @@ impl<'a> GermlineDatabase<'a> {
         }
 
         let mut germlines = Vec::with_capacity(germline_count);
+        let mut by_segment_chain: [Vec<usize>; 14] = std::array::from_fn(|_| Vec::new());
         for _ in 0..germline_count {
             let segment = match reader.u8()? {
                 b'V' => Segment::V,
@@ -73,24 +72,30 @@ impl<'a> GermlineDatabase<'a> {
                 .copied()
                 .ok_or_else(|| Error::model("invalid germline species index"))?;
             let gene = reader.short_string()?;
-            let sequence = reader.take(PACKED_LENGTH)?;
+            let sequence: &'a [u8; PACKED_LENGTH] = reader
+                .take(PACKED_LENGTH)?
+                .try_into()
+                .map_err(|_| Error::model("invalid packed germline length"))?;
             for position in 0..ALIGNMENT_LENGTH {
-                if decode_residue(sequence, position)? >= ALPHABET.len() {
+                if decode_residue(sequence, position) >= ALPHABET.len() {
                     return Err(Error::model("invalid packed germline residue"));
                 }
             }
+            let germline_index = germlines.len();
             germlines.push(Germline {
-                segment,
-                chain_type,
                 species,
                 gene,
                 sequence,
             });
+            by_segment_chain[segment_chain_index(segment, chain_type)].push(germline_index);
         }
         if !reader.remaining.is_empty() {
             return Err(Error::model("trailing bytes in germline database"));
         }
-        Ok(Self { germlines })
+        Ok(Self {
+            germlines,
+            by_segment_chain,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -104,11 +109,9 @@ impl<'a> GermlineDatabase<'a> {
 
 #[derive(Clone, Copy, Debug)]
 struct Germline<'a> {
-    segment: Segment,
-    chain_type: ChainType,
     species: &'a str,
     gene: &'a str,
-    sequence: &'a [u8],
+    sequence: &'a [u8; PACKED_LENGTH],
 }
 
 pub(crate) fn assign_closest_germline(
@@ -124,19 +127,20 @@ pub(crate) fn assign_closest_germline(
         Segment::V,
         chain_type,
         allowed_species,
+        None,
         &state_sequence,
-    )?;
+    );
     let Some((v, v_identity)) = best_v else {
         return Ok(None);
     };
-    let assigned_species = [v.species.to_owned()];
     let best_j = best_match(
         database,
         Segment::J,
         chain_type,
-        Some(&assigned_species),
+        None,
+        Some(v.species),
         &state_sequence,
-    )?;
+    );
 
     Ok(Some(GermlineAssignment {
         species: v.species.to_owned(),
@@ -164,16 +168,18 @@ fn state_sequence(domain: &RawDomain, sequence: &[u8]) -> [u8; ALIGNMENT_LENGTH]
     result
 }
 
-fn best_match<'a>(
-    database: &'a GermlineDatabase<'a>,
+fn best_match<'a, 'data>(
+    database: &'a GermlineDatabase<'data>,
     segment: Segment,
     chain_type: ChainType,
     allowed_species: Option<&[String]>,
+    exact_species: Option<&str>,
     state_sequence: &[u8; ALIGNMENT_LENGTH],
-) -> Result<Option<(&'a Germline<'a>, f32)>> {
+) -> Option<(&'a Germline<'data>, f32)> {
     let mut best = None;
-    for germline in &database.germlines {
-        if germline.segment != segment || germline.chain_type != chain_type {
+    for &index in &database.by_segment_chain[segment_chain_index(segment, chain_type)] {
+        let germline = &database.germlines[index];
+        if exact_species.is_some_and(|species| !species.eq_ignore_ascii_case(germline.species)) {
             continue;
         }
         if allowed_species.is_some_and(|allowed| {
@@ -183,22 +189,19 @@ fn best_match<'a>(
         }) {
             continue;
         }
-        let identity = identity(state_sequence, germline.sequence)?;
+        let identity = identity(state_sequence, germline.sequence);
         if best.is_none_or(|(_, best_identity)| identity > best_identity) {
             best = Some((germline, identity));
         }
     }
-    Ok(best)
+    best
 }
 
-fn identity(state_sequence: &[u8; ALIGNMENT_LENGTH], packed: &[u8]) -> Result<f32> {
+fn identity(state_sequence: &[u8; ALIGNMENT_LENGTH], packed: &[u8; PACKED_LENGTH]) -> f32 {
     let mut compared = 0_u16;
     let mut matched = 0_u16;
     for (position, observed) in state_sequence.iter().enumerate() {
-        let residue_index = decode_residue(packed, position)?;
-        let Some(expected) = ALPHABET.get(residue_index).copied() else {
-            return Err(Error::model("invalid packed germline residue"));
-        };
+        let expected = ALPHABET[decode_residue(packed, position)];
         if expected == b'-' {
             continue;
         }
@@ -206,29 +209,38 @@ fn identity(state_sequence: &[u8; ALIGNMENT_LENGTH], packed: &[u8]) -> Result<f3
         matched += u16::from(*observed == expected);
     }
     if compared == 0 {
-        Ok(0.0)
+        0.0
     } else {
-        Ok(f32::from(matched) / f32::from(compared))
+        f32::from(matched) / f32::from(compared)
     }
 }
 
-fn decode_residue(packed: &[u8], position: usize) -> Result<usize> {
+fn decode_residue(packed: &[u8; PACKED_LENGTH], position: usize) -> usize {
     let bit_offset = position * 5;
     let byte_offset = bit_offset / 8;
     let shift = bit_offset % 8;
-    let first = packed
-        .get(byte_offset)
-        .copied()
-        .ok_or_else(|| Error::model("truncated packed germline sequence"))?;
-    let mut value = u16::from(first) >> shift;
+    let mut value = u16::from(packed[byte_offset]) >> shift;
     if shift > 3 {
-        let second = packed
-            .get(byte_offset + 1)
-            .copied()
-            .ok_or_else(|| Error::model("truncated packed germline sequence"))?;
-        value |= u16::from(second) << (8 - shift);
+        value |= u16::from(packed[byte_offset + 1]) << (8 - shift);
     }
-    Ok(usize::from(value & 0x1f))
+    usize::from(value & 0x1f)
+}
+
+const fn segment_chain_index(segment: Segment, chain_type: ChainType) -> usize {
+    let segment_offset = match segment {
+        Segment::V => 0,
+        Segment::J => 7,
+    };
+    let chain_offset = match chain_type {
+        ChainType::H => 0,
+        ChainType::K => 1,
+        ChainType::L => 2,
+        ChainType::A => 3,
+        ChainType::B => 4,
+        ChainType::G => 5,
+        ChainType::D => 6,
+    };
+    segment_offset + chain_offset
 }
 
 struct Reader<'a> {
@@ -272,7 +284,7 @@ mod tests {
     #[test]
     fn embedded_database_contains_pinned_inventory() {
         let database = embedded_germlines().unwrap();
-        assert_eq!(database.len(), 2_389);
+        assert_eq!(database.len(), 2_444);
     }
 
     #[test]

@@ -82,7 +82,7 @@ struct V2ReferenceScoreComponents {
 }
 
 #[test]
-fn corpus_v2_matches_pinned_anarci() {
+fn corpus_v2_matches_versioned_anarci_reference() {
     let inputs: Vec<V2InputCase> =
         serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json"))
             .expect("checked-in corpus_v2 input is valid JSON");
@@ -101,14 +101,30 @@ fn corpus_v2_matches_pinned_anarci() {
             let inputs = &inputs;
             let reference_cases = &reference.cases;
             workers.push(scope.spawn(move || {
+                let mut failures = Vec::new();
                 for case_index in (shard_index..inputs.len()).step_by(worker_count) {
-                    assert_v2_case(&inputs[case_index], &reference_cases[case_index]);
+                    if std::panic::catch_unwind(|| {
+                        assert_v2_case(&inputs[case_index], &reference_cases[case_index]);
+                    })
+                    .is_err()
+                    {
+                        failures.push(inputs[case_index].id.clone());
+                    }
                 }
+                failures
             }));
         }
+        let mut failures = Vec::new();
         for worker in workers {
-            worker.join().expect("expanded parity worker panicked");
+            failures.extend(worker.join().expect("expanded parity worker panicked"));
         }
+        failures.sort_unstable();
+        assert!(
+            failures.is_empty(),
+            "{} corpus_v2 cases failed parity: {}",
+            failures.len(),
+            failures.join(", ")
+        );
     });
 }
 
@@ -143,8 +159,6 @@ fn assert_v2_case(input: &V2InputCase, expected_case: &V2ReferenceCase) {
         &input.seq,
         &NumberingOptions {
             assign_germline: true,
-            // Full hit-table mode recovers each alternative's HMMER query
-            // bounds instead of reusing its initial Viterbi envelope.
             alternative_hit_count: 28,
             ..NumberingOptions::default()
         },

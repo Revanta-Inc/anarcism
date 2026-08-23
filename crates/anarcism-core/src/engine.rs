@@ -4,12 +4,12 @@ use std::num::NonZeroUsize;
 #[cfg(not(target_family = "wasm"))]
 use std::sync::Mutex;
 
+use crate::components::connected_components;
 use crate::germlines::assign_closest_germline;
 use crate::hmm::{
-    RawDomain, SEQUENCE_BATCH_LANES, define_domain, domain_score_components_with_hit_bounds,
-    domain_score_components_with_null2, msv_filter_passes, realign_domain, realign_envelope,
+    DomainAlignment, RawDomain, SEQUENCE_BATCH_LANES, SequenceBatchViterbiWorkspace, define_domain,
+    domain_score_components_with_posterior, msv_filter_passes, realign_domain, realign_envelope,
     recover_long_cdr3, trace_emission_score, ungapped_filter_score, viterbi_domains,
-    viterbi_filter_bit_scores_batch,
 };
 use crate::numbering::number_imgt;
 use crate::sequence::{MAX_SEQUENCE_LENGTH, NormalizedSequence, normalize_sequence};
@@ -19,11 +19,64 @@ use crate::{
     SequenceResult, embedded_profiles,
 };
 
-const MAX_ALTERNATIVE_HITS: usize = 28;
 const EXACT_PROFILE_RESERVE: usize = 7;
 const MIN_EXACT_PROFILES: usize = 10;
 const BATCH_PROFILE_RESERVE: usize = 4;
 const MIN_BATCH_PROFILES: usize = 7;
+const BATCH_TASK_SEQUENCE_LIMIT: usize = SEQUENCE_BATCH_LANES * 32;
+
+struct SearchPlan<'a> {
+    options: &'a NumberingOptions,
+    allowed_profiles: u64,
+    exact_profile_budget: usize,
+}
+
+impl<'a> SearchPlan<'a> {
+    fn new(database: &ProfileDatabase<'_>, options: &'a NumberingOptions) -> Result<Self> {
+        validate_options(options)?;
+        let maximum_alternatives = database.profiles().len().saturating_sub(1);
+        if options.alternative_hit_count > maximum_alternatives {
+            return Err(Error::sequence(
+                ErrorCode::InvalidOptions,
+                format!("alternativeHitCount cannot exceed {maximum_alternatives}"),
+                None,
+            ));
+        }
+        let allowed_profiles = database
+            .profiles()
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| profile_is_allowed(profile, options))
+            .fold(0_u64, |mask, (index, _)| mask | (1_u64 << index));
+        Ok(Self {
+            options,
+            allowed_profiles,
+            exact_profile_budget: options
+                .alternative_hit_count
+                .saturating_add(EXACT_PROFILE_RESERVE)
+                .max(MIN_EXACT_PROFILES),
+        })
+    }
+
+    fn allows_profile(&self, index: usize) -> bool {
+        self.allowed_profiles & (1_u64 << index) != 0
+    }
+
+    fn initial_trace_budget(&self, sequence_length: usize, available_profiles: usize) -> usize {
+        self.exact_profile_budget
+            .saturating_mul(estimated_domain_count(sequence_length))
+            .min(available_profiles)
+    }
+
+    fn batch_trace_budget(&self, sequence_length: usize, available_profiles: usize) -> usize {
+        self.options
+            .alternative_hit_count
+            .saturating_add(BATCH_PROFILE_RESERVE)
+            .max(MIN_BATCH_PROFILES)
+            .saturating_mul(estimated_domain_count(sequence_length))
+            .min(available_profiles)
+    }
+}
 
 #[derive(Debug)]
 struct Candidate<'a> {
@@ -33,6 +86,8 @@ struct Candidate<'a> {
     bias: f32,
     query_start: usize,
     query_end: usize,
+    alignment_source: Option<DomainAlignment>,
+    aligned_domain: Option<RawDomain>,
 }
 
 impl Candidate<'_> {
@@ -53,6 +108,7 @@ struct PreparedRecord<'a> {
 struct ProfileBatchTask {
     profile_index: usize,
     sequence_indices: Vec<usize>,
+    #[cfg(not(target_family = "wasm"))]
     work: usize,
 }
 
@@ -65,77 +121,73 @@ pub fn number_sequence_with_id(
     sequence: &str,
     options: &NumberingOptions,
 ) -> Result<SequenceResult> {
-    validate_options(options)?;
-    let normalized = normalize_sequence(id, sequence)?;
     let database = embedded_profiles()?;
-    number_normalized_sequence(id, normalized, options, database)
+    let plan = SearchPlan::new(database, options)?;
+    let normalized = normalize_sequence(id, sequence)?;
+    number_normalized_sequence(id, normalized, &plan, database)
 }
 
 pub fn number_sequences(
     inputs: &[SequenceInput],
     options: &NumberingOptions,
 ) -> Result<Vec<SequenceResult>> {
-    validate_options(options)?;
+    let database = embedded_profiles()?;
+    let plan = SearchPlan::new(database, options)?;
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
 
-    let database = embedded_profiles()?;
     let normalized: Vec<_> = inputs
         .iter()
         .map(|input| normalize_sequence(&input.id, &input.sequence))
         .collect::<Result<_>>()?;
-    let records = prepare_records(inputs, normalized, database, options);
-    number_prepared_records(records, options, database).map(strip_result_indices)
+    let records = prepare_records(inputs, normalized, database, &plan);
+    number_prepared_records(records, &plan, database).map(strip_result_indices)
 }
 
-/// Number a native batch concurrently while preserving input order.
-///
-/// The caller chooses the maximum worker count explicitly so applications
-/// that already own a thread pool can avoid accidental oversubscription.
-/// WebAssembly builds omit this API and retain the serial batch path.
+/// Number a native batch concurrently with an explicit worker limit.
 #[cfg(not(target_family = "wasm"))]
 pub fn number_sequences_parallel(
     inputs: &[SequenceInput],
     options: &NumberingOptions,
     worker_count: NonZeroUsize,
 ) -> Result<Vec<SequenceResult>> {
-    validate_options(options)?;
+    let database = embedded_profiles()?;
+    let plan = SearchPlan::new(database, options)?;
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
 
-    let database = embedded_profiles()?;
     let normalized: Vec<_> = inputs
         .iter()
         .map(|input| normalize_sequence(&input.id, &input.sequence))
         .collect::<Result<_>>()?;
     let worker_count = worker_count.get().min(inputs.len());
     if worker_count <= 1 {
-        let records = prepare_records(inputs, normalized, database, options);
-        return number_prepared_records(records, options, database).map(strip_result_indices);
+        let records = prepare_records(inputs, normalized, database, &plan);
+        return number_prepared_records(records, &plan, database).map(strip_result_indices);
     }
 
     let initial_profiles =
-        parallel_initial_profile_indices(database, &normalized, options, worker_count);
+        parallel_initial_profile_indices(database, &normalized, &plan, worker_count);
     let mut records = records_with_profiles(inputs, normalized, initial_profiles);
     if records.len() >= SEQUENCE_BATCH_LANES {
         let eligible_profiles =
-            parallel_batch_eligible_profile_indices(database, &records, options, worker_count);
+            parallel_batch_eligible_profile_indices(database, &records, &plan, worker_count);
         replace_record_profiles(&mut records, eligible_profiles);
     }
-    parallel_number_prepared_records(records, options, database, worker_count)
+    parallel_number_prepared_records(records, &plan, database, worker_count)
 }
 
 fn prepare_records<'a>(
     inputs: &'a [SequenceInput],
     normalized: Vec<NormalizedSequence>,
     database: &ProfileDatabase<'_>,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
 ) -> Vec<PreparedRecord<'a>> {
     let profiles = normalized
         .iter()
-        .map(|sequence| initial_profile_indices(database, sequence, options))
+        .map(|sequence| initial_profile_indices(database, sequence, plan))
         .collect();
     records_with_profiles(inputs, normalized, profiles)
 }
@@ -170,7 +222,7 @@ fn replace_record_profiles(records: &mut [PreparedRecord<'_>], profiles: Vec<Vec
 fn parallel_initial_profile_indices(
     database: &ProfileDatabase<'_>,
     sequences: &[NormalizedSequence],
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
     worker_count: usize,
 ) -> Vec<Vec<usize>> {
     let weighted: Vec<_> = sequences
@@ -191,7 +243,7 @@ fn parallel_initial_profile_indices(
                         .map(|index| {
                             (
                                 index,
-                                initial_profile_indices(database, &sequences[index], options),
+                                initial_profile_indices(database, &sequences[index], plan),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -242,12 +294,13 @@ fn distribute_by_weight<T>(
 fn parallel_batch_eligible_profile_indices(
     database: &ProfileDatabase<'_>,
     records: &[PreparedRecord<'_>],
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
     worker_count: usize,
 ) -> Vec<Vec<usize>> {
     let weighted = profile_batch_tasks(database, records)
         .into_iter()
-        .map(|task| (task.work, task.profile_index, task))
+        .enumerate()
+        .map(|(task_index, task)| (task.work, task_index, task))
         .collect();
     let shards = distribute_by_weight(weighted, worker_count);
 
@@ -258,14 +311,21 @@ fn parallel_batch_eligible_profile_indices(
             .map(|shard| {
                 scope.spawn(move || {
                     let mut scores = Vec::new();
+                    let mut workspace = SequenceBatchViterbiWorkspace::new(database.model_length());
                     for task in shard {
-                        scores.extend(score_profile_batch_task(database, records, &task));
+                        score_profile_batch_task(
+                            database,
+                            records,
+                            &task,
+                            &mut workspace,
+                            &mut scores,
+                        );
                     }
                     scores
                 })
             })
             .collect();
-        let mut rescored: Vec<Vec<(f32, usize)>> = (0..records.len()).map(|_| Vec::new()).collect();
+        let mut rescored = rescore_buckets(records);
         for worker in workers {
             let scores = match worker.join() {
                 Ok(scores) => scores,
@@ -277,33 +337,20 @@ fn parallel_batch_eligible_profile_indices(
         }
         rescored
     });
-    finish_batch_eligible_profile_indices(database, records, rescored, options)
+    finish_batch_eligible_profile_indices(database, records, rescored, plan)
 }
 
-fn profile_batch_work(
-    profile: &Profile<'_>,
-    records: &[PreparedRecord<'_>],
-    sequence_indices: &[usize],
-) -> usize {
-    let mut counts = BTreeMap::new();
-    for index in sequence_indices {
-        *counts
-            .entry(records[*index].sequence.encoded.len())
-            .or_insert(0_usize) += 1;
-    }
-    counts.into_iter().fold(0_usize, |work, (length, count)| {
-        work.saturating_add(
-            length
-                .saturating_mul(count.div_ceil(SEQUENCE_BATCH_LANES))
-                .saturating_mul(profile.consensus().len()),
-        )
-    })
+#[cfg(not(target_family = "wasm"))]
+fn profile_batch_work(profile: &Profile<'_>, sequence_length: usize, count: usize) -> usize {
+    sequence_length
+        .saturating_mul(count.div_ceil(SEQUENCE_BATCH_LANES))
+        .saturating_mul(profile.consensus().len())
 }
 
 #[cfg(not(target_family = "wasm"))]
 fn parallel_number_prepared_records(
     mut records: Vec<PreparedRecord<'_>>,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
     database: &ProfileDatabase<'_>,
     worker_count: usize,
 ) -> Result<Vec<SequenceResult>> {
@@ -329,7 +376,7 @@ fn parallel_number_prepared_records(
                         let Some(record) = record else {
                             break;
                         };
-                        results.push(number_prepared_record(record, options, database)?);
+                        results.push(number_prepared_record(record, plan, database)?);
                     }
                     Ok(results)
                 })
@@ -362,7 +409,7 @@ pub fn validate_antibody_pair(
     vl: &str,
     options: &PairValidationOptions,
 ) -> Result<PairValidationResult> {
-    validate_options(&options.numbering)?;
+    SearchPlan::new(embedded_profiles()?, &options.numbering)?;
     if options.start_max >= options.end_min || options.end_min > MAX_SEQUENCE_LENGTH {
         return Err(Error::sequence(
             ErrorCode::InvalidOptions,
@@ -414,28 +461,28 @@ pub fn validate_antibody_pair(
 
 fn number_prepared_records(
     mut records: Vec<PreparedRecord<'_>>,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
     database: &ProfileDatabase<'_>,
 ) -> Result<Vec<(usize, SequenceResult)>> {
     if records.len() >= SEQUENCE_BATCH_LANES {
-        let eligible_profiles = batch_eligible_profile_indices(database, &records, options);
+        let eligible_profiles = batch_eligible_profile_indices(database, &records, plan);
         replace_record_profiles(&mut records, eligible_profiles);
     }
     records
         .into_iter()
-        .map(|record| number_prepared_record(record, options, database))
+        .map(|record| number_prepared_record(record, plan, database))
         .collect()
 }
 
 fn number_prepared_record(
     record: PreparedRecord<'_>,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
     database: &ProfileDatabase<'_>,
 ) -> Result<(usize, SequenceResult)> {
     number_normalized_with_profiles(
         record.id,
         record.sequence,
-        options,
+        plan,
         database,
         record
             .profiles
@@ -499,19 +546,19 @@ fn validate_pair_domain(
 fn number_normalized_sequence(
     id: &str,
     normalized: NormalizedSequence,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
     database: &ProfileDatabase<'_>,
 ) -> Result<SequenceResult> {
-    let eligible = initial_profile_indices(database, &normalized, options)
+    let eligible = initial_profile_indices(database, &normalized, plan)
         .into_iter()
         .map(|profile_index| &database.profiles()[profile_index]);
-    number_normalized_with_profiles(id, normalized, options, database, eligible)
+    number_normalized_with_profiles(id, normalized, plan, database, eligible)
 }
 
 fn number_normalized_with_profiles<'a>(
     id: &str,
     normalized: NormalizedSequence,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
     database: &'a ProfileDatabase<'a>,
     eligible: impl IntoIterator<Item = &'a Profile<'a>>,
 ) -> Result<SequenceResult> {
@@ -519,11 +566,10 @@ fn number_normalized_with_profiles<'a>(
     let scored_clusters = score_candidate_clusters(
         candidates,
         &normalized.encoded,
-        exact_profile_budget(options),
-        options.alternative_hit_count == MAX_ALTERNATIVE_HITS,
-        options.min_bit_score,
+        plan.exact_profile_budget,
+        plan.options.min_bit_score,
     );
-    let domains = render_domains(database, &normalized, options, scored_clusters)?;
+    let domains = render_domains(database, &normalized, plan.options, scored_clusters)?;
 
     Ok(SequenceResult {
         id: id.to_owned(),
@@ -553,6 +599,8 @@ fn collect_candidates<'a>(
                 bias: 0.0,
                 query_start,
                 query_end,
+                alignment_source: None,
+                aligned_domain: None,
             });
         }
     }
@@ -563,36 +611,28 @@ fn score_candidate_clusters<'a>(
     candidates: Vec<Candidate<'a>>,
     sequence: &[u8],
     exact_profile_budget: usize,
-    recover_hit_bounds: bool,
     min_bit_score: f32,
 ) -> Vec<Vec<Candidate<'a>>> {
     let exact_candidates = cluster_candidates(candidates)
         .into_iter()
         .flat_map(|mut cluster| {
-            // Viterbi trace scores eliminate the reserve profile before the
-            // costlier Forward/Backward posterior pass. Every candidate that can
-            // be returned (winner plus requested alternatives) remains exact.
+            // Reserve profiles cannot displace a requested exact result.
             cluster.truncate(exact_profile_budget);
             for candidate in &mut cluster {
-                score_defined_domain_candidate(candidate, sequence, recover_hit_bounds);
+                score_defined_domain_candidate(candidate, sequence);
             }
             cluster
         })
         .collect();
 
-    // Domain definition can expand several short Viterbi seeds onto the same
-    // posterior envelope. Recluster those exact envelopes so one biological
-    // domain is not reported once for every seed that led to it.
+    // Several Viterbi seeds can resolve to one posterior envelope.
     let mut clusters = cluster_candidates(exact_candidates);
 
     let is_multidomain_target = clusters.len() > 1;
     if is_multidomain_target {
-        // Optimized HMMER and the scalar browser implementation can differ by
-        // a few thousandths in calibrated significance. Within that narrow
-        // numerical uncertainty band, prefer the higher domain bit score;
-        // this mirrors the optimized ordering at multidomain boundaries.
+        // Use bit score inside the calibrated numerical uncertainty band.
         for cluster in &mut clusters {
-            cluster.sort_by(multidomain_candidate_order);
+            sort_multidomain_candidates(cluster);
         }
     }
 
@@ -611,20 +651,31 @@ fn render_domains(
     options: &NumberingOptions,
     scored_clusters: Vec<Vec<Candidate<'_>>>,
 ) -> Result<Vec<DomainResult>> {
-    // ANARCI runs hmmscan against the complete profile database. HMMER's
-    // independent domain E-value therefore uses the full database size as Z,
-    // even when caller-side chain/species filters restrict returned hits.
+    // ANARCI's independent E-value always uses the complete database as Z.
     let e_value_search_space = database.profiles().len();
     let domain_count = scored_clusters.len();
     let mut domains = Vec::with_capacity(domain_count);
-    for (domain_index, cluster) in scored_clusters.into_iter().enumerate() {
-        let best = &cluster[0];
+    for (domain_index, mut cluster) in scored_clusters.into_iter().enumerate() {
+        for candidate in cluster
+            .iter_mut()
+            .take(options.alternative_hit_count.saturating_add(1))
+        {
+            let aligned = candidate
+                .alignment_source
+                .take()
+                .and_then(|source| source.align(candidate.profile))
+                .unwrap_or_else(|| {
+                    realign_envelope(candidate.profile, &candidate.domain, &normalized.encoded)
+                });
+            candidate.query_start = aligned.start;
+            candidate.query_end = aligned.end;
+            candidate.aligned_domain = Some(aligned);
+        }
+        let best = cluster.remove(0);
         let aligned_domain = if domain_count == 1 {
-            // Domain definition has already selected the exact simple-region
-            // or stochastic-cluster envelope. OA alignment must stay inside
-            // it; ANARCI's later J-region recovery handles a genuinely long
-            // CDR3 without changing the HMMER domain score.
-            realign_envelope(best.profile, &best.domain, &normalized.encoded)
+            best.aligned_domain.unwrap_or_else(|| {
+                realign_envelope(best.profile, &best.domain, &normalized.encoded)
+            })
         } else {
             realign_domain(best.profile, &best.domain, &normalized.encoded)
         };
@@ -637,13 +688,11 @@ fn render_domains(
             normalized.text.as_bytes(),
             &aligned_domain,
             best.profile.chain_type(),
-            best.profile.species(),
             domain_index == 0,
             domain_count == 1,
         );
         let alternative_hits = cluster
             .iter()
-            .skip(1)
             .take(options.alternative_hit_count)
             .map(|candidate| candidate_hit(candidate, e_value_search_space))
             .collect();
@@ -681,13 +730,13 @@ fn render_domains(
 fn ranked_profile_indices(
     database: &ProfileDatabase<'_>,
     sequence: &[u8],
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
 ) -> Vec<(f32, usize)> {
     let mut ranked_profiles: Vec<_> = database
         .profiles()
         .iter()
         .enumerate()
-        .filter(|(_, profile)| profile_is_allowed(profile, options))
+        .filter(|(profile_index, _)| plan.allows_profile(*profile_index))
         .filter(|(_, profile)| msv_filter_passes(profile, sequence))
         .map(|(profile_index, profile)| {
             let filter_score = ungapped_filter_score(profile, sequence);
@@ -708,33 +757,13 @@ fn estimated_domain_count(sequence_length: usize) -> usize {
     ((sequence_length + 49) / 100).clamp(1, 7)
 }
 
-fn initial_trace_budget(
-    sequence_length: usize,
-    options: &NumberingOptions,
-    available_profiles: usize,
-) -> usize {
-    // Keep every species profile for the likely chain family in reach of the
-    // exact Forward pass. Closely related H/K profiles can rank poorly under
-    // an ungapped filter yet win decisively once their indel path is scored.
-    exact_profile_budget(options)
-        .saturating_mul(estimated_domain_count(sequence_length))
-        .min(available_profiles)
-}
-
-fn exact_profile_budget(options: &NumberingOptions) -> usize {
-    options
-        .alternative_hit_count
-        .saturating_add(EXACT_PROFILE_RESERVE)
-        .max(MIN_EXACT_PROFILES)
-}
-
 fn initial_profile_indices(
     database: &ProfileDatabase<'_>,
     sequence: &NormalizedSequence,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
 ) -> Vec<usize> {
-    let ranked = ranked_profile_indices(database, &sequence.encoded, options);
-    let budget = initial_trace_budget(sequence.encoded.len(), options, ranked.len());
+    let ranked = ranked_profile_indices(database, &sequence.encoded, plan);
+    let budget = plan.initial_trace_budget(sequence.encoded.len(), ranked.len());
     ranked
         .into_iter()
         .take(budget)
@@ -742,67 +771,68 @@ fn initial_profile_indices(
         .collect()
 }
 
-fn batch_trace_budget(
-    sequence_length: usize,
-    options: &NumberingOptions,
-    available_profiles: usize,
-) -> usize {
-    options
-        .alternative_hit_count
-        .saturating_add(BATCH_PROFILE_RESERVE)
-        .max(MIN_BATCH_PROFILES)
-        .saturating_mul(estimated_domain_count(sequence_length))
-        .min(available_profiles)
-}
-
 fn batch_eligible_profile_indices(
     database: &ProfileDatabase<'_>,
     records: &[PreparedRecord<'_>],
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
 ) -> Vec<Vec<usize>> {
-    let mut rescored: Vec<Vec<(f32, usize)>> = (0..records.len()).map(|_| Vec::new()).collect();
+    let mut rescored = rescore_buckets(records);
+    let mut workspace = SequenceBatchViterbiWorkspace::new(database.model_length());
+    let mut task_scores = Vec::new();
     for task in profile_batch_tasks(database, records) {
-        for (sequence_index, score, profile_index) in
-            score_profile_batch_task(database, records, &task)
-        {
+        score_profile_batch_task(database, records, &task, &mut workspace, &mut task_scores);
+        for (sequence_index, score, profile_index) in task_scores.drain(..) {
             rescored[sequence_index].push((score, profile_index));
         }
     }
 
-    finish_batch_eligible_profile_indices(database, records, rescored, options)
+    finish_batch_eligible_profile_indices(database, records, rescored, plan)
+}
+
+fn rescore_buckets(records: &[PreparedRecord<'_>]) -> Vec<Vec<(f32, usize)>> {
+    records
+        .iter()
+        .map(|record| Vec::with_capacity(record.profiles.len()))
+        .collect()
 }
 
 fn profile_batch_tasks(
     database: &ProfileDatabase<'_>,
     records: &[PreparedRecord<'_>],
 ) -> Vec<ProfileBatchTask> {
-    let mut sequences_by_profile = vec![Vec::new(); database.profiles().len()];
+    #[cfg(target_family = "wasm")]
+    let _ = database;
+    let mut sequences_by_profile_and_length: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     for (sequence_index, record) in records.iter().enumerate() {
         if estimated_domain_count(record.sequence.encoded.len()) != 1 {
             continue;
         }
         for &profile_index in &record.profiles {
-            sequences_by_profile[profile_index].push(sequence_index);
+            sequences_by_profile_and_length
+                .entry((profile_index, record.sequence.encoded.len()))
+                .or_default()
+                .push(sequence_index);
         }
     }
 
-    sequences_by_profile
+    sequences_by_profile_and_length
         .into_iter()
-        .enumerate()
-        .filter_map(|(profile_index, sequence_indices)| {
-            if sequence_indices.is_empty() {
-                return None;
-            }
-            let work = profile_batch_work(
-                &database.profiles()[profile_index],
-                records,
-                &sequence_indices,
-            );
-            Some(ProfileBatchTask {
-                profile_index,
-                sequence_indices,
-                work,
-            })
+        .flat_map(|((profile_index, sequence_length), sequence_indices)| {
+            #[cfg(target_family = "wasm")]
+            let _ = sequence_length;
+            sequence_indices
+                .chunks(BATCH_TASK_SEQUENCE_LIMIT)
+                .map(move |chunk| ProfileBatchTask {
+                    profile_index,
+                    sequence_indices: chunk.to_vec(),
+                    #[cfg(not(target_family = "wasm"))]
+                    work: profile_batch_work(
+                        &database.profiles()[profile_index],
+                        sequence_length,
+                        chunk.len(),
+                    ),
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -811,32 +841,35 @@ fn score_profile_batch_task(
     database: &ProfileDatabase<'_>,
     records: &[PreparedRecord<'_>],
     task: &ProfileBatchTask,
-) -> Vec<(usize, f32, usize)> {
+    workspace: &mut SequenceBatchViterbiWorkspace,
+    output: &mut Vec<(usize, f32, usize)>,
+) {
     let profile = &database.profiles()[task.profile_index];
     let encoded: Vec<&[u8]> = task
         .sequence_indices
         .iter()
         .map(|index| records[*index].sequence.encoded.as_slice())
         .collect();
-    task.sequence_indices
-        .iter()
-        .copied()
-        .zip(viterbi_filter_bit_scores_batch(profile, &encoded))
-        .map(|(sequence_index, score)| {
-            (
-                sequence_index,
-                profile_significance(profile, score),
-                task.profile_index,
-            )
-        })
-        .collect()
+    output.extend(
+        task.sequence_indices
+            .iter()
+            .copied()
+            .zip(workspace.score(profile, &encoded).iter().copied())
+            .map(|(sequence_index, score)| {
+                (
+                    sequence_index,
+                    profile_significance(profile, score),
+                    task.profile_index,
+                )
+            }),
+    );
 }
 
 fn finish_batch_eligible_profile_indices(
     database: &ProfileDatabase<'_>,
     records: &[PreparedRecord<'_>],
     rescored: Vec<Vec<(f32, usize)>>,
-    options: &NumberingOptions,
+    plan: &SearchPlan<'_>,
 ) -> Vec<Vec<usize>> {
     rescored
         .into_iter()
@@ -852,7 +885,7 @@ fn finish_batch_eligible_profile_indices(
                         .cmp(database.profiles()[right.1].name())
                 })
             });
-            let budget = batch_trace_budget(record.sequence.encoded.len(), options, profiles.len());
+            let budget = plan.batch_trace_budget(record.sequence.encoded.len(), profiles.len());
             profiles
                 .into_iter()
                 .take(budget)
@@ -862,38 +895,19 @@ fn finish_batch_eligible_profile_indices(
         .collect()
 }
 
-fn score_defined_domain_candidate(
-    candidate: &mut Candidate<'_>,
-    sequence: &[u8],
-    recover_hit_bounds: bool,
-) {
+fn score_defined_domain_candidate(candidate: &mut Candidate<'_>, sequence: &[u8]) {
     let definition = define_domain(candidate.profile, &candidate.domain, sequence);
     candidate.domain.start = definition.start;
     candidate.domain.end = definition.end;
-    let (components, hit_bounds) = if recover_hit_bounds {
-        domain_score_components_with_hit_bounds(
-            candidate.profile,
-            &candidate.domain,
-            sequence,
-            definition.trace_null2_bias,
-        )
-    } else {
-        (
-            domain_score_components_with_null2(
-                candidate.profile,
-                &candidate.domain,
-                sequence,
-                definition.trace_null2_bias,
-            ),
-            None,
-        )
-    };
+    let (components, alignment) = domain_score_components_with_posterior(
+        candidate.profile,
+        &candidate.domain,
+        sequence,
+        definition.trace_null2_bias,
+    );
     candidate.bit_score = components.bit_score;
     candidate.bias = components.null2_bias_bits;
-    if let Some((query_start, query_end)) = hit_bounds {
-        candidate.query_start = query_start;
-        candidate.query_end = query_end;
-    }
+    candidate.alignment_source = alignment;
 }
 
 fn validate_options(options: &NumberingOptions) -> Result<()> {
@@ -901,13 +915,6 @@ fn validate_options(options: &NumberingOptions) -> Result<()> {
         return Err(Error::sequence(
             ErrorCode::InvalidOptions,
             "minBitScore must be finite",
-            None,
-        ));
-    }
-    if options.alternative_hit_count > MAX_ALTERNATIVE_HITS {
-        return Err(Error::sequence(
-            ErrorCode::InvalidOptions,
-            format!("alternativeHitCount cannot exceed {MAX_ALTERNATIVE_HITS}"),
             None,
         ));
     }
@@ -949,21 +956,8 @@ fn cluster_candidates<'a>(mut candidates: Vec<Candidate<'a>>) -> Vec<Vec<Candida
             .then_with(|| left.domain.end.cmp(&right.domain.end))
             .then_with(|| candidate_order(left, right))
     });
-    let mut clusters: Vec<Vec<Candidate<'a>>> = Vec::new();
-    for candidate in candidates {
-        if let Some(cluster) = clusters.iter_mut().find(|cluster| {
-            cluster
-                .iter()
-                .any(|other| domains_overlap(&candidate, other))
-        }) {
-            cluster.push(candidate);
-        } else {
-            clusters.push(vec![candidate]);
-        }
-    }
+    let mut clusters = connected_components(candidates, domains_overlap);
 
-    // A profile can occasionally produce duplicate HSP-like paths for one domain.
-    // Retain only its best candidate in each physical-domain cluster.
     for cluster in &mut clusters {
         cluster.sort_by(candidate_order);
         let mut seen = BTreeSet::new();
@@ -996,14 +990,22 @@ fn candidate_order(left: &Candidate<'_>, right: &Candidate<'_>) -> std::cmp::Ord
         .then_with(|| left.profile.name().cmp(right.profile.name()))
 }
 
-fn multidomain_candidate_order(left: &Candidate<'_>, right: &Candidate<'_>) -> std::cmp::Ordering {
-    if (left.ranking_score() - right.ranking_score()).abs() <= 0.01 {
-        right
-            .bit_score
-            .total_cmp(&left.bit_score)
-            .then_with(|| left.profile.name().cmp(right.profile.name()))
-    } else {
-        candidate_order(left, right)
+fn sort_multidomain_candidates(candidates: &mut [Candidate<'_>]) {
+    candidates.sort_by(candidate_order);
+    let mut cohort_start = 0;
+    while cohort_start < candidates.len() {
+        let anchor = candidates[cohort_start].ranking_score();
+        let cohort_end = candidates[cohort_start + 1..]
+            .iter()
+            .position(|candidate| anchor - candidate.ranking_score() > 0.01)
+            .map_or(candidates.len(), |offset| cohort_start + 1 + offset);
+        candidates[cohort_start..cohort_end].sort_by(|left, right| {
+            right
+                .bit_score
+                .total_cmp(&left.bit_score)
+                .then_with(|| left.profile.name().cmp(right.profile.name()))
+        });
+        cohort_start = cohort_end;
     }
 }
 
@@ -1049,7 +1051,7 @@ mod tests {
     const VL: &str = "DIVMTQSQKFMSTSVGDRVSITCKASQNVGTAVAWYQQKPGQSPKLMIYSASNRYTGVPDRFTGSGSGTDFTLTISNMQSEDLADYFCQQYSSYPLTFGAGTKLELKR";
 
     #[test]
-    fn feasibility_sequences_are_detected_and_numbered() {
+    fn reference_vh_and_vl_sequences_are_detected_and_numbered() {
         let vh = number_sequence(VH, &NumberingOptions::default()).unwrap();
         assert_eq!(vh.domains.len(), 1);
         assert_eq!(vh.domains[0].chain_type, ChainType::H);
@@ -1074,6 +1076,55 @@ mod tests {
             ChainType::K | ChainType::L
         ));
         assert_eq!(vl.domains[0].alternative_hits[0].profile, "rat_K");
+    }
+
+    #[test]
+    fn increasing_alternative_count_preserves_existing_hits() {
+        let with_three = number_sequence(VH, &NumberingOptions::default()).unwrap();
+        let with_all = number_sequence(
+            VH,
+            &NumberingOptions {
+                alternative_hit_count: embedded_profiles().unwrap().profiles().len() - 1,
+                ..NumberingOptions::default()
+            },
+        )
+        .unwrap();
+        let three = &with_three.domains[0];
+        let all = &with_all.domains[0];
+        assert_eq!(three.chain_type, all.chain_type);
+        assert_eq!(three.species, all.species);
+        assert_eq!(
+            (three.query_start, three.query_end),
+            (all.query_start, all.query_end)
+        );
+        assert_eq!(three.alternative_hits, all.alternative_hits[..3]);
+    }
+
+    #[test]
+    fn large_profile_batches_are_split_into_equal_length_tasks() {
+        let inputs: Vec<_> = (0..BATCH_TASK_SEQUENCE_LIMIT + 1)
+            .map(|index| SequenceInput {
+                id: index.to_string(),
+                sequence: VH.to_owned(),
+            })
+            .collect();
+        let normalized = inputs
+            .iter()
+            .map(|input| normalize_sequence(&input.id, &input.sequence).unwrap())
+            .collect();
+        let profiles = vec![vec![0]; inputs.len()];
+        let records = records_with_profiles(&inputs, normalized, profiles);
+        let tasks = profile_batch_tasks(embedded_profiles().unwrap(), &records);
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].sequence_indices.len(), BATCH_TASK_SEQUENCE_LIMIT);
+        assert_eq!(tasks[1].sequence_indices.len(), 1);
+        assert!(tasks.iter().all(|task| {
+            let length = records[task.sequence_indices[0]].sequence.encoded.len();
+            task.sequence_indices
+                .iter()
+                .all(|index| records[*index].sequence.encoded.len() == length)
+        }));
     }
 
     #[test]

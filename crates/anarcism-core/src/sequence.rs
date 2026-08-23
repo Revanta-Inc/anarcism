@@ -2,6 +2,16 @@ use crate::{Error, ErrorCode, Result};
 
 pub(crate) const AMINO_ALPHABET: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
 pub(crate) const MAX_SEQUENCE_LENGTH: usize = 10_000;
+const INVALID_RESIDUE: u8 = u8::MAX;
+const RESIDUE_INDICES: [u8; 256] = {
+    let mut indices = [INVALID_RESIDUE; 256];
+    let mut index = 0;
+    while index < AMINO_ALPHABET.len() {
+        indices[AMINO_ALPHABET[index] as usize] = index as u8;
+        index += 1;
+    }
+    indices
+};
 
 #[derive(Debug)]
 pub(crate) struct NormalizedSequence {
@@ -70,10 +80,8 @@ pub(crate) fn normalize_sequence(id: &str, input: &str) -> Result<NormalizedSequ
 }
 
 pub(crate) fn residue_index(residue: u8) -> Option<u8> {
-    AMINO_ALPHABET
-        .iter()
-        .position(|candidate| *candidate == residue)
-        .and_then(|index| index.try_into().ok())
+    let index = RESIDUE_INDICES[usize::from(residue)];
+    (index != INVALID_RESIDUE).then_some(index)
 }
 
 #[cfg(test)]

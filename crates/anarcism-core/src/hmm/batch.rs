@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use wide::f32x8;
 
 use super::{
@@ -7,54 +5,18 @@ use super::{
 };
 use crate::Profile;
 
-/// Score one profile against many targets in sequence-major SIMD lanes.
-///
-/// Targets are grouped by exact length so every lane follows the same DP
-/// control flow. A short final group is padded by repeating its last target;
-/// only scores for real lanes are returned. The model is shared across lanes,
-/// keeping its transitions and emissions hot while LLVM vectorizes the
-/// independent lane arithmetic. Only two DP rows are retained because this
-/// stage ranks profiles; selected profiles are traced with `ViterbiMatrix`.
-pub(crate) fn viterbi_filter_bit_scores_batch(
-    profile: &Profile<'_>,
-    sequences: &[&[u8]],
-) -> Vec<f32> {
-    let mut scores = vec![f32::NEG_INFINITY; sequences.len()];
-    let mut by_length: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (index, sequence) in sequences.iter().enumerate() {
-        if !sequence.is_empty() {
-            by_length.entry(sequence.len()).or_default().push(index);
-        }
-    }
-
-    let mut workspace = SequenceBatchViterbiWorkspace::new(profile.consensus().len());
-    for indices in by_length.values() {
-        for chunk in indices.chunks(SEQUENCE_BATCH_LANES) {
-            let mut lanes = [sequences[chunk[0]]; SEQUENCE_BATCH_LANES];
-            for (lane, sequence_index) in chunk.iter().copied().enumerate() {
-                lanes[lane] = sequences[sequence_index];
-            }
-            let lane_scores = workspace.score_equal_length(profile, &lanes);
-            for (lane, sequence_index) in chunk.iter().copied().enumerate() {
-                scores[sequence_index] =
-                    (lane_scores[lane] - null_one_score(sequences[sequence_index].len())) / LN_2;
-            }
-        }
-    }
-    scores
-}
-
-struct SequenceBatchViterbiWorkspace {
+pub(crate) struct SequenceBatchViterbiWorkspace {
     previous_match: Vec<f32x8>,
     previous_insert: Vec<f32x8>,
     previous_delete: Vec<f32x8>,
     current_match: Vec<f32x8>,
     current_insert: Vec<f32x8>,
     current_delete: Vec<f32x8>,
+    scores: Vec<f32>,
 }
 
 impl SequenceBatchViterbiWorkspace {
-    fn new(model_length: usize) -> Self {
+    pub(crate) fn new(model_length: usize) -> Self {
         let row = vec![f32x8::NEG_INFINITY; model_length + 1];
         Self {
             previous_match: row.clone(),
@@ -63,10 +25,40 @@ impl SequenceBatchViterbiWorkspace {
             current_match: row.clone(),
             current_insert: row.clone(),
             current_delete: row,
+            scores: Vec::new(),
         }
     }
 
-    fn score_equal_length(
+    /// Score one profile against equal-length targets in sequence-major SIMD lanes.
+    /// The final lane group is padded; only real-lane scores are returned.
+    pub(crate) fn score<'a>(&'a mut self, profile: &Profile<'_>, sequences: &[&[u8]]) -> &'a [f32] {
+        self.scores.clear();
+        if sequences.is_empty() {
+            return &self.scores;
+        }
+        debug_assert!(!sequences[0].is_empty());
+        debug_assert!(
+            sequences
+                .iter()
+                .all(|sequence| sequence.len() == sequences[0].len())
+        );
+
+        let null_score = null_one_score(sequences[0].len());
+        self.scores.reserve(sequences.len());
+        for chunk in sequences.chunks(SEQUENCE_BATCH_LANES) {
+            let mut lanes = [chunk[0]; SEQUENCE_BATCH_LANES];
+            lanes[..chunk.len()].copy_from_slice(chunk);
+            let lane_scores = self.score_lanes(profile, &lanes);
+            self.scores.extend(
+                lane_scores[..chunk.len()]
+                    .iter()
+                    .map(|score| (*score - null_score) / LN_2),
+            );
+        }
+        &self.scores
+    }
+
+    fn score_lanes(
         &mut self,
         profile: &Profile<'_>,
         sequences: &[&[u8]; SEQUENCE_BATCH_LANES],
