@@ -1,4 +1,4 @@
-//! Convert the pinned ANARCI germline export into a compact deterministic
+//! Convert a versioned ANARCI germline export into a compact deterministic
 //! binary representation. Aligned residues use a five-bit alphabet.
 
 use std::collections::BTreeMap;

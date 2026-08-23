@@ -1,7 +1,5 @@
 //! Minimal JSON-over-C-ABI bridge for modern browsers.
-//!
-//! Avoiding `wasm-bindgen` keeps both the binary and JavaScript glue small. The
-//! safe browser wrapper is the public interface; the raw exports are internal.
+//! The JavaScript wrapper is public; raw exports are internal.
 
 use anarcism_core::{
     ChainType, Error, NumberingOptions, PairValidationOptions, SequenceInput, embedded_profiles,

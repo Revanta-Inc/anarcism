@@ -1,12 +1,5 @@
-//! PyO3 bindings for the anarcism engine.
-//!
-//! The Python surface mirrors the browser package but uses snake_case names and
-//! keyword arguments. Enumerations cross as plain strings so a result converts
-//! to JSON without a custom encoder and matches the JavaScript contract.
-//!
-//! Every analysis call releases the GIL. `anarcism-core` is pure computation
-//! over embedded models with no Python state, so releasing lets a thread pool
-//! use more than one core.
+//! PyO3 bindings mirroring the browser API with Python naming conventions.
+//! Analysis calls release the GIL.
 
 use std::num::NonZeroUsize;
 
@@ -48,11 +41,9 @@ fn parse_chain(value: &str) -> PyResult<ChainType> {
     }
 }
 
-/// Converts an engine error into `AnarcismError`, preserving the machine-readable code.
 fn to_py_error(py: Python<'_>, error: &Error) -> PyErr {
     let raised = AnarcismError::new_err(error.to_string());
     let value = raised.value(py);
-    // A freshly built exception instance always accepts attribute assignment.
     let _ = value.setattr("code", error.code.as_str());
     let _ = value.setattr("input_id", error.input_id.clone());
     raised
@@ -315,26 +306,26 @@ impl PairValidationResult {
     }
 }
 
-fn residue_to_py(py: Python<'_>, value: &CoreResidue) -> PyResult<Py<NumberedResidue>> {
+fn residue_to_py(py: Python<'_>, value: CoreResidue) -> PyResult<Py<NumberedResidue>> {
     Py::new(
         py,
         NumberedResidue {
             sequence_index: value.sequence_index,
             amino_acid: value.amino_acid.to_string(),
             position: value.position,
-            insertion_code: value.insertion_code.clone(),
+            insertion_code: value.insertion_code,
             region: value.region.as_str().to_owned(),
         },
     )
 }
 
-fn hit_to_py(py: Python<'_>, value: &CoreHit) -> PyResult<Py<ProfileHit>> {
+fn hit_to_py(py: Python<'_>, value: CoreHit) -> PyResult<Py<ProfileHit>> {
     Py::new(
         py,
         ProfileHit {
-            profile: value.profile.clone(),
+            profile: value.profile,
             chain_type: value.chain_type.as_str().to_owned(),
-            species: value.species.clone(),
+            species: value.species,
             bit_score: value.bit_score,
             e_value: value.e_value,
             bias: value.bias,
@@ -344,96 +335,109 @@ fn hit_to_py(py: Python<'_>, value: &CoreHit) -> PyResult<Py<ProfileHit>> {
     )
 }
 
-fn germline_to_py(py: Python<'_>, value: &CoreGermline) -> PyResult<Py<GermlineAssignment>> {
+fn germline_to_py(py: Python<'_>, value: CoreGermline) -> PyResult<Py<GermlineAssignment>> {
     Py::new(
         py,
         GermlineAssignment {
-            species: value.species.clone(),
-            v_gene: value.v_gene.clone(),
+            species: value.species,
+            v_gene: value.v_gene,
             v_identity: value.v_identity,
-            j_gene: value.j_gene.clone(),
+            j_gene: value.j_gene,
             j_identity: value.j_identity,
         },
     )
 }
 
-fn domain_to_py(py: Python<'_>, value: &CoreDomain) -> PyResult<Py<DomainResult>> {
-    let numbering = value
-        .numbering
-        .iter()
+fn domain_to_py(py: Python<'_>, value: CoreDomain) -> PyResult<Py<DomainResult>> {
+    let CoreDomain {
+        domain_index,
+        receptor_type,
+        chain_type,
+        species,
+        start,
+        end,
+        bit_score,
+        e_value,
+        bias,
+        query_start,
+        query_end,
+        numbering,
+        padded_imgt_alignment,
+        alternative_hits,
+        germline,
+    } = value;
+    let numbering = numbering
+        .into_iter()
         .map(|residue| residue_to_py(py, residue))
         .collect::<PyResult<Vec<_>>>()?;
-    let alternative_hits = value
-        .alternative_hits
-        .iter()
+    let alternative_hits = alternative_hits
+        .into_iter()
         .map(|hit| hit_to_py(py, hit))
         .collect::<PyResult<Vec<_>>>()?;
-    let germline = match &value.germline {
+    let germline = match germline {
         Some(germline) => Some(germline_to_py(py, germline)?),
         None => None,
     };
     Py::new(
         py,
         DomainResult {
-            domain_index: value.domain_index,
-            receptor_type: value.receptor_type.as_str().to_owned(),
-            chain_type: value.chain_type.as_str().to_owned(),
-            species: value.species.clone(),
-            start: value.start,
-            end: value.end,
-            bit_score: value.bit_score,
-            e_value: value.e_value,
-            bias: value.bias,
-            query_start: value.query_start,
-            query_end: value.query_end,
+            domain_index,
+            receptor_type: receptor_type.as_str().to_owned(),
+            chain_type: chain_type.as_str().to_owned(),
+            species,
+            start,
+            end,
+            bit_score,
+            e_value,
+            bias,
+            query_start,
+            query_end,
             numbering,
-            padded_imgt_alignment: value.padded_imgt_alignment.clone(),
+            padded_imgt_alignment,
             alternative_hits,
             germline,
         },
     )
 }
 
-fn sequence_to_py(py: Python<'_>, value: &CoreSequence) -> PyResult<Py<SequenceResult>> {
-    let domains = value
-        .domains
-        .iter()
+fn sequence_to_py(py: Python<'_>, value: CoreSequence) -> PyResult<Py<SequenceResult>> {
+    let CoreSequence {
+        id,
+        normalized_sequence,
+        domains,
+        warnings,
+    } = value;
+    let domains = domains
+        .into_iter()
         .map(|domain| domain_to_py(py, domain))
         .collect::<PyResult<Vec<_>>>()?;
     Py::new(
         py,
         SequenceResult {
-            id: value.id.clone(),
-            normalized_sequence: value.normalized_sequence.clone(),
+            id,
+            normalized_sequence,
             domains,
-            warnings: value.warnings.clone(),
+            warnings,
         },
     )
 }
 
-fn pair_to_py(py: Python<'_>, value: &CorePair) -> PyResult<Py<PairValidationResult>> {
-    let vh = match &value.vh {
+fn pair_to_py(py: Python<'_>, value: CorePair) -> PyResult<Py<PairValidationResult>> {
+    let CorePair { ok, vh, vl, errors } = value;
+    let vh = match vh {
         Some(domain) => Some(domain_to_py(py, domain)?),
         None => None,
     };
-    let vl = match &value.vl {
+    let vl = match vl {
         Some(domain) => Some(domain_to_py(py, domain)?),
         None => None,
     };
-    Py::new(
-        py,
-        PairValidationResult {
-            ok: value.ok,
-            vh,
-            vl,
-            errors: value.errors.clone(),
-        },
-    )
+    Py::new(py, PairValidationResult { ok, vh, vl, errors })
 }
 
-fn sequences_to_py(py: Python<'_>, values: &[CoreSequence]) -> PyResult<Vec<Py<SequenceResult>>> {
+fn sequences_to_py(py: Python<'_>, values: Vec<CoreSequence>) -> PyResult<Vec<Py<SequenceResult>>> {
     values
-        .iter()
+        .into_iter()
         .map(|value| sequence_to_py(py, value))
         .collect()
 }
@@ -474,13 +478,10 @@ fn number_sequence(
     let result = py
         .detach(|| number_sequence_with_id(&id, &sequence, &options))
         .map_err(|error| to_py_error(py, &error))?;
-    sequence_to_py(py, &result)
+    sequence_to_py(py, result)
 }
 
-/// Number a batch of `(id, sequence)` pairs, preserving input order.
-///
-/// `workers` above 1 spreads the batch over that many threads and returns
-/// results identical to the serial path.
+/// Number a batch while preserving input order.
 #[pyfunction]
 #[pyo3(signature = (
     inputs,
@@ -530,7 +531,7 @@ fn number_sequences(
             None => core_number_sequences(&records, &options),
         })
         .map_err(|error| to_py_error(py, &error))?;
-    sequences_to_py(py, &results)
+    sequences_to_py(py, results)
 }
 
 /// Number every record in a FASTA document.
@@ -563,7 +564,7 @@ fn number_fasta(
     let results = py
         .detach(|| core_number_fasta(&fasta, &options))
         .map_err(|error| to_py_error(py, &error))?;
-    sequences_to_py(py, &results)
+    sequences_to_py(py, results)
 }
 
 /// Check that a heavy/light pair each contain exactly one well-placed domain.
@@ -611,7 +612,7 @@ fn validate_antibody_pair(
     let result = py
         .detach(|| core_validate_pair(&vh, &vl, &options))
         .map_err(|error| to_py_error(py, &error))?;
-    pair_to_py(py, &result)
+    pair_to_py(py, result)
 }
 
 /// Chain types present in the embedded profile inventory.

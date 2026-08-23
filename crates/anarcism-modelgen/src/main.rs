@@ -1,5 +1,5 @@
-//! Convert the pinned ANARCI HMMER3/f database into the compact, deterministic
-//! representation embedded by the browser engine.
+//! Convert a versioned ANARCI-generated HMMER3/f database into the compact,
+//! deterministic representation embedded by the browser engine.
 
 use std::env;
 use std::fmt::{self, Display};
@@ -184,7 +184,6 @@ fn parse_hmmer3(source: &str) -> Result<Vec<RawProfile>> {
         }
         cursor += 1;
 
-        // Transition labels, COMPO, node-0 insert emissions, node-0 transitions.
         cursor += 1;
         require_line(&lines, cursor, &name, "COMPO")?;
         cursor += 1;
@@ -218,8 +217,7 @@ fn parse_hmmer3(source: &str) -> Result<Vec<RawProfile>> {
             )?);
             consensus.push(fields[21].as_bytes()[0].to_ascii_uppercase());
 
-            // Insert emissions are deliberately omitted: HMMER3 hardwires their
-            // configured log-odds scores to zero for protein profiles.
+            // Protein insert emissions have zero configured log odds.
             require_line(&lines, cursor, &name, "insert emissions")?;
             cursor += 1;
             transitions_nlog.push(parse_scores::<7>(
@@ -362,8 +360,7 @@ fn encode(profiles: &[RawProfile]) -> Result<Vec<u8>> {
             }
         }
 
-        // DP transitions are read from nodes 1..M-1. Node 0 is used only
-        // to derive occupancy/local-entry scores; node M cannot transition.
+        // DP transitions exist only for nodes 1..M-1.
         for node in profile.transitions_nlog.iter().take(profile.length).skip(1) {
             for negative_log_probability in node {
                 push_i24(&mut output, quantize(-*negative_log_probability));
@@ -373,8 +370,7 @@ fn encode(profiles: &[RawProfile]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Reproduce HMMER 3.4's `mf_conversion()`: one-third-bit unsigned
-/// emission costs for the limited-precision MSV filter.
+/// Reproduce HMMER 3.4's one-third-bit `mf_conversion()`.
 fn msv_match_costs(match_scores: &[[f32; 20]]) -> (u8, Vec<u8>) {
     let maximum = match_scores
         .iter()
@@ -382,9 +378,7 @@ fn msv_match_costs(match_scores: &[[f32; 20]]) -> (u8, Vec<u8>) {
         .copied()
         .fold(0.0_f32, f32::max);
     let bias = msv_unbiased_byte_cost(-maximum);
-    // HMMER's optimized profile keeps one contiguous vector per residue.
-    // Using the same residue-major layout lets LLVM vectorize the model-state
-    // recurrence without gathers on native and wasm SIMD targets.
+    // Residue-major storage avoids gathers in the MSV recurrence.
     let costs = (0..ALPHABET.len())
         .flat_map(|residue| {
             match_scores
@@ -431,8 +425,7 @@ fn local_entry_scores(transitions: &[[f32; 7]], length: usize) -> Vec<f32> {
             + (1.0 - previous) * probability(transitions[node - 1][DM]);
     }
 
-    // Keep the otherwise-unused constant visible beside the HMMER recurrence:
-    // insert occupancy divides by I->M, though local match entry does not.
+    // Insert occupancy uses I->M; local match entry does not.
     let _ = IM;
     let normalizer: f32 = (1..=length)
         .map(|node| occupancy[node] * (length - node + 1) as f32)

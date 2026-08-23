@@ -13,23 +13,13 @@ name = "_anarcism"
 crate-type = ["cdylib"]
 
 [features]
-# `extension-module` leaves the CPython symbols to the host interpreter. It is
-# on by default so a bare `cargo build`/`clippy` needs no libpython to link
-# against; maturin enables the same feature through `pyproject.toml`.
 default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 anarcism-core = { path = "../anarcism-core" }
-# `generate-import-lib` lets the Windows build synthesize its own `python3.lib`,
-# which is what allows the Windows wheel to be cross-compiled from Linux with
-# no interpreter present. Without it a Windows build needs a local interpreter.
 pyo3 = { version = "0.27.2", default-features = false, features = [
     "abi3-py311",
     "generate-import-lib",
     "macros",
 ] }
-
-# `unsafe_code` is not forbidden here, unlike the rest of the workspace: the
-# `#[pyclass]` and `#[pymodule]` expansions emit `unsafe impl`. This crate adds
-# no hand-written `unsafe`, and all analysis stays in `anarcism-core`.
