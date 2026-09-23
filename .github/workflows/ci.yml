@@ -113,7 +113,7 @@ jobs:
             manylinux: musllinux_1_2
             test: false
           - runner: macos-14
-            target: universal2-apple-darwin
+            target: aarch64-apple-darwin
             manylinux: auto
             test: true
           - runner: windows-2025
