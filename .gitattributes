@@ -1,0 +1,2 @@
+# Byte-for-byte ANARCI output fixtures keep LF line endings on every platform.
+python/tests/fixtures/** text eol=lf
