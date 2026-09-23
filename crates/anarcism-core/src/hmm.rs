@@ -8,6 +8,7 @@ use crate::sequence::{CANONICAL_RESIDUE_COUNT, UNKNOWN_RESIDUE_INDEX};
 
 mod batch;
 pub(crate) use batch::SequenceBatchViterbiWorkspace;
+pub(crate) mod exact_batch;
 
 const MATCH: usize = 0;
 const INSERT: usize = 1;
@@ -233,10 +234,21 @@ pub(crate) fn posterior_regions(profile: &Profile<'_>, sequence: &[u8]) -> Vec<P
         model_occupancy[sequence_position] = (1.0 - flank_probability).clamp(0.0, 1.0);
     }
 
+    regions_from_posterior_totals(&begin_total, &end_total, &model_occupancy)
+}
+
+fn regions_from_posterior_totals(
+    begin_total: &[f32],
+    end_total: &[f32],
+    model_occupancy: &[f32],
+) -> Vec<PosteriorRegion> {
+    debug_assert_eq!(begin_total.len(), end_total.len());
+    debug_assert_eq!(begin_total.len(), model_occupancy.len());
+    let sequence_length = begin_total.len().saturating_sub(1);
     let mut regions = Vec::new();
     let mut region_start = None;
     let mut triggered = false;
-    for sequence_position in 1..=sequence.len() {
+    for sequence_position in 1..=sequence_length {
         if !triggered {
             let begin_probability =
                 begin_total[sequence_position] - begin_total[sequence_position - 1];
@@ -278,6 +290,15 @@ pub(crate) fn define_domain(
     sequence: &[u8],
 ) -> DomainDefinition {
     let regions = posterior_regions(profile, sequence);
+    define_domain_from_regions(profile, seed, sequence, &regions)
+}
+
+pub(crate) fn define_domain_from_regions(
+    profile: &Profile<'_>,
+    seed: &RawDomain,
+    sequence: &[u8],
+    regions: &[PosteriorRegion],
+) -> DomainDefinition {
     let Some(region) = regions.iter().max_by_key(|region| {
         region
             .end

@@ -18,6 +18,7 @@ repository = "https://github.com/revanta/anarcism"
 [workspace.dependencies]
 serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
+wide = { version = "1.6.0", default-features = false }
 
 [profile.release]
 opt-level = 3

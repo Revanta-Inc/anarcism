@@ -2,6 +2,10 @@
 
 The browser distribution contains transformed ANARCI model data and an independent Rust implementation of behavior described by ANARCI and HMMER. It also contains transformed germline data originating from IMGT. No native ANARCI, HMMER, MUSCLE, or Python code executes at runtime.
 
+## Rust SIMD support
+
+The runtime uses `wide` 1.6.1, `safe_arch` 1.2.0, and `bytemuck` 1.25.2. These crates are copyright Daniel "Lokathor" Gee and are available under Zlib OR Apache-2.0 OR MIT; this distribution uses them under Apache-2.0. Their source repositories are <https://github.com/Lokathor/wide>, <https://github.com/Lokathor/safe_arch>, and <https://github.com/Lokathor/bytemuck>.
+
 ## ANARCI
 
 Source release: ANARCI 2026.2.13.2, commit `edcc29a08c40ac5acd49ce09f60a5ebfb7ccdd0c`.
