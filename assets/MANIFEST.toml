@@ -1,17 +1,23 @@
 [reference]
-anarci_version = "2026.2.13.2"
-anarci_tag = "v2026.02.13.2"
-anarci_commit = "edcc29a08c40ac5acd49ce09f60a5ebfb7ccdd0c"
-anarci_wheel_sha256 = "8f88d49857abc2c5427c6cc903ebdac7b35e6636635eaa9d60bd8f0d4e7d14b7"
+anarci_repository = "https://github.com/oxpig/ANARCI"
+anarci_commit = "79f6c575056dedef86cb8f405ebb039197923eec"
+anarci_core_sha256 = "f42311674d73ae45a4553aa13dbe618a3efad527ef9d8bd6135d57dff1eb4b45"
 hmmer_version = "3.4"
 scheme = "IMGT"
+imgt_source = "IMGT/GENE-DB live reference directory"
+imgt_genedb_program_version = "3.1.43"
+imgt_genedb_release = "202638-7"
+imgt_snapshot = "2026-09-23"
+imgt_retrieved_at = "2026-09-23T15:32:24Z"
+imgt_reference_export = "IMGTGENEDB-ReferenceSequences.fasta-AA-WithGaps-F+ORF+inframeP"
+imgt_reference_export_sha256 = "a7a2274b67e81178f52310172e12676696fdbc4b47ebf8b6ac1c5b867d9f57ef"
 
 [profiles]
-source = "anarci/dat/HMMs/ALL.hmm"
-source_sha256 = "60051f5a838704eb97fe39488f23894aa335ddadd24ad72b241f6e1cea6829ee"
+source = "build_pipeline/HMMs/ALL.hmm in the pinned official ANARCI checkout"
+source_sha256 = "96d377e4b0d571af518699fb4ad31cafb345cf513522ec30465764c2d7816505"
 output = "assets/profiles.bin"
-output_sha256 = "385ffd02779d776b414250d72c53cff6b96c6c5001a0cfad3d0fda0c1f9dbc83"
-format = "ANRCPRF2"
+output_sha256 = "b927faa5664cf731ebc77da07245c926124f89c8a75f97bdc03f39692d5d9a72"
+format = "ANRCPRF3"
 score_scale = 32768
 score_bits = 24
 model_length = 128
@@ -50,17 +56,17 @@ models = [
 ]
 
 [germlines]
-source = "anarci/germlines.py"
-source_sha256 = "95a13463e2620b8037bf7ea67ecdf9ec6f8a8f973c5658f3c54126e9e36f3452"
+source = "build_pipeline/curated_alignments/germlines.py in the pinned official ANARCI checkout"
+source_sha256 = "c7e20ce5fefcbb7333b36127922762bfde75e662125698cd42a39a2e101dcb7f"
 output = "assets/germlines.bin"
-output_sha256 = "2498aac3bc732ec5abab31768c38854e9d6a1a8d127aa0821454fe19ccfd9d7e"
+output_sha256 = "a5a54cf15661cdcc1660571b03b9da87caad00c517714d75df1cf84abecd1839"
 format = "ANRCGER1"
 alphabet_bits = 5
 aligned_length = 128
-count = 2389
+count = 2450
 generator = "tools/export_germlines.py + germlinegen"
 species = ["human", "mouse", "rat", "rabbit", "rhesus", "pig", "alpaca", "cow"]
 
 [numbering_reference]
-source = "anarci/schemes.py"
+source = "lib/python/anarci/schemes.py in the pinned official ANARCI checkout"
 source_sha256 = "856f4c942c226cbeabfabb69f8bfd4004f00f9b0aa6ce1e296636d2ce88f4b4b"

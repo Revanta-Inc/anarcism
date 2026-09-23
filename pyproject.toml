@@ -41,12 +41,16 @@ include = [
 ]
 
 [dependency-groups]
-# The pinned native ANARCI/HMMER reference. It generates the golden corpora and
-# backs the parity and comparison benchmarks; it is never a runtime dependency
-# of the published wheel. Install it alone, without building the extension:
-#   uv sync --locked --no-install-project --no-default-groups --group reference
-reference = ["anarci==2026.2.13.2"]
+reference = [
+	# Development-only compatibility reference. ANARCI is intentionally not a
+	# dependency of the published anarcism wheel.
+	"anarci",
+	"biopython==1.88",
+]
 dev = ["maturin>=1.9,<2.0", "pytest>=8.4.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+
+[tool.uv.sources]
+anarci = { git = "https://github.com/oxpig/ANARCI.git", rev = "79f6c575056dedef86cb8f405ebb039197923eec" }

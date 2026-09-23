@@ -8,7 +8,7 @@ The runtime uses `wide` 1.6.1, `safe_arch` 1.2.0, and `bytemuck` 1.25.2. These c
 
 ## ANARCI
 
-Source release: ANARCI 2026.2.13.2, commit `edcc29a08c40ac5acd49ce09f60a5ebfb7ccdd0c`.
+Pipeline and behavioral source: the official ANARCI repository, <https://github.com/oxpig/ANARCI>, commit `79f6c575056dedef86cb8f405ebb039197923eec`. The embedded profile and germline inputs were regenerated with that source pipeline from the IMGT/GENE-DB 3.1.43 live reference directory retrieved on 2026-09-23.
 
 Copyright 2019 Charlotte Deane, James Dunbar, Alexsandr Kovaltsuk, Claire Marks
 
@@ -54,4 +54,4 @@ The germline sequences underlying ANARCI's models and aligned germline table ori
 
 Attribution: IMGT®, the international ImMunoGeneTics information system®, Institute of Human Genetics (Université de Montpellier and CNRS), <https://www.imgt.org>.
 
-Changes: the data were obtained through the pinned ANARCI distribution, not by invoking an IMGT tool; aligned records were packed and model scores were quantized as described above. IMGT®, Université de Montpellier, and CNRS do not endorse this project. IMGT® is a registered mark of CNRS.
+Changes: the data were retrieved from the IMGT/GENE-DB live reference directory through ANARCI's pinned build pipeline on 2026-09-23. The pipeline curated and aligned the records and built the HMMER profiles; this project then packed the aligned records and quantized model scores as described above. No IMGT tool executes at runtime. IMGT®, Université de Montpellier, and CNRS do not endorse this project. IMGT® is a registered mark of CNRS.

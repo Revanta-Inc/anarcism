@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the pinned ANARCI germline table for the Rust asset generator.
+"""Export the versioned ANARCI/IMGT germline table for the Rust asset generator.
 
 This is a build-time provenance tool. The generated browser package never
 imports Python or ANARCI.
@@ -8,13 +8,22 @@ imports Python or ANARCI.
 from __future__ import annotations
 
 import argparse
-from importlib.metadata import version
+import importlib
+import tomllib
+from hashlib import sha256
 from pathlib import Path
 
 from anarci.germlines import all_germlines
 
-
-PINNED_ANARCI = "2026.2.13.2"
+ROOT = Path(__file__).resolve().parents[1]
+MANIFEST = tomllib.loads((ROOT / "assets/MANIFEST.toml").read_text())
+ANARCI_REPOSITORY = MANIFEST["reference"]["anarci_repository"]
+ANARCI_COMMIT = MANIFEST["reference"]["anarci_commit"]
+IMGT_GENEDB_PROGRAM_VERSION = MANIFEST["reference"][
+    "imgt_genedb_program_version"
+]
+IMGT_SNAPSHOT = MANIFEST["reference"]["imgt_snapshot"]
+EXPECTED_GERMLINES_SHA256 = MANIFEST["germlines"]["source_sha256"]
 VALID_CHAINS = frozenset("HKLABGD")
 VALID_RESIDUES = frozenset("-ACDEFGHIKLMNPQRSTVWY")
 
@@ -24,15 +33,17 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
 
-    observed_version = version("anarci")
-    if observed_version != PINNED_ANARCI:
+    germline_module = importlib.import_module("anarci.germlines")
+    source_path = Path(germline_module.__file__ or "")
+    source_hash = sha256(source_path.read_bytes()).hexdigest()
+    if source_hash != EXPECTED_GERMLINES_SHA256:
         raise SystemExit(
-            f"expected ANARCI {PINNED_ANARCI}, found {observed_version}"
+            f"expected {IMGT_SNAPSHOT} germlines.py SHA-256 "
+            f"{EXPECTED_GERMLINES_SHA256}, found {source_hash} at {source_path}"
         )
 
     rows: list[tuple[str, str, str, str, str]] = []
-    # Preserve the source dictionaries' order. Python's max() keeps the first
-    # equal-identity germline, so this order is part of compatibility.
+    # Source order resolves equal-identity germline ties.
     for segment in ("V", "J"):
         for chain, by_species in all_germlines[segment].items():
             if chain not in VALID_CHAINS:
@@ -48,11 +59,16 @@ def main() -> None:
                             f"{segment}/{chain}/{species}/{gene} has invalid residues"
                         )
                     if any("\t" in field or "\n" in field for field in (species, gene)):
-                        raise ValueError("germline metadata cannot contain tabs or newlines")
+                        raise ValueError(
+                            "germline metadata cannot contain tabs or newlines"
+                        )
                     rows.append((segment, chain, species, gene, sequence))
 
     with args.output.open("w", encoding="utf-8", newline="\n") as output:
-        output.write(f"# ANARCI {PINNED_ANARCI} germlines.py\n")
+        output.write(
+            f"# ANARCI {ANARCI_REPOSITORY} commit {ANARCI_COMMIT}, IMGT/GENE-DB "
+            f"{IMGT_GENEDB_PROGRAM_VERSION} snapshot {IMGT_SNAPSHOT} germlines.py\n"
+        )
         output.write("# segment\tchain\tspecies\tgene\taligned_sequence\n")
         for row in rows:
             output.write("\t".join(row))
