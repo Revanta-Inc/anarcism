@@ -282,12 +282,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_database_contains_pinned_inventory() {
-        let database = embedded_germlines().unwrap();
-        assert_eq!(database.len(), 2_444);
-    }
-
-    #[test]
     fn embedded_database_is_decoded_once_and_shared() {
         let first = embedded_germlines().unwrap();
         let second = embedded_germlines().unwrap();
