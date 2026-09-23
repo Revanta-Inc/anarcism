@@ -16,8 +16,13 @@ export default defineConfig({
 		reuseExistingServer: !process.env.CI,
 	},
 	projects: [
-		{ name: "chromium", use: { ...devices["Desktop Chrome"] } },
-		{ name: "firefox", use: { ...devices["Desktop Firefox"] } },
-		{ name: "webkit", use: { ...devices["Desktop Safari"] } },
+		{
+			name: "chromium",
+			use: {
+				...devices["Desktop Chrome"],
+				// CI supplies Chrome through browser-actions/setup-chrome.
+				launchOptions: { executablePath: process.env.CHROME_PATH },
+			},
+		},
 	],
 });
