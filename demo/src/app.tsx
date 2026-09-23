@@ -21,6 +21,8 @@ const PRIMARY_BUTTON =
 const GHOST_BUTTON =
 	"rounded-md border border-zinc-300 px-2 py-1 text-xs text-blue-700 disabled:opacity-50";
 const PANEL = "rounded-lg border border-zinc-200 bg-white p-4";
+const LINK =
+	"text-blue-700 underline decoration-zinc-300 underline-offset-2 hover:decoration-blue-700";
 
 interface Settings {
 	chains: ChainType[];
@@ -347,7 +349,39 @@ export function App() {
 					)}
 				</section>
 			</div>
+
+			<footer class="mt-6 border-t border-zinc-200 pt-4 text-xs leading-relaxed text-zinc-500">
+				anarcism is an independent reimplementation of{" "}
+				<a class={LINK} href="https://github.com/oxpig/ANARCI">
+					ANARCI
+				</a>{" "}
+				(
+				<Citation doi="10.1093/bioinformatics/btv552">
+					Dunbar &amp; Deane, Bioinformatics 2016
+				</Citation>
+				). It reproduces HMMER 3.4 scoring (
+				<Citation doi="10.1371/journal.pcbi.1002195">Eddy, PLoS Comput Biol 2011</Citation>) and
+				uses the IMGT numbering scheme (
+				<Citation doi="10.1016/S0145-305X(02)00039-3">
+					Lefranc et al., Dev Comp Immunol 2003
+				</Citation>
+				) with germline genes from IMGT/GENE-DB (
+				<Citation doi="10.1093/nar/gki010">Giudicelli et al., Nucleic Acids Res 2005</Citation>).
+				When you publish results, please cite anarcism (
+				<a class={LINK} href="https://github.com/revanta-inc/anarcism/blob/main/CITATION.cff">
+					Cite this repository
+				</a>
+				) together with these works.
+			</footer>
 		</div>
+	);
+}
+
+function Citation({ doi, children }: { doi: string; children: string }) {
+	return (
+		<a class={LINK} href={`https://doi.org/${doi}`}>
+			{children}
+		</a>
 	);
 }
 
