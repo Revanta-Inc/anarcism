@@ -1,0 +1,127 @@
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+
+jobs:
+  ci:
+    name: Wait for CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    outputs:
+      run-id: ${{ steps.ci.outputs.run-id }}
+      version: ${{ steps.ci.outputs.version }}
+    steps:
+      - name: Wait for CI on the release commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$GITHUB_SHA" --event push --limit 1 \
+            --json databaseId --jq '.[0].databaseId')"
+          if [[ -z "$run_id" ]]; then
+            echo "::error::CI has not run for ${GITHUB_SHA}; cut releases from commits pushed to main."
+            exit 1
+          fi
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30 > /dev/null
+          echo "run-id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  pypi:
+    name: Publish to PyPI
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/anarcism/${{ needs.ci.outputs.version }}/
+    permissions:
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: anarcism-wheel-*
+          merge-multiple: true
+          path: dist
+          run-id: ${{ needs.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: anarcism-sdist
+          path: dist
+          run-id: ${{ needs.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Check the distributions match the release
+        env:
+          VERSION: ${{ needs.ci.outputs.version }}
+        run: |
+          ls -l dist
+          test -f "dist/anarcism-${VERSION}.tar.gz"
+          for file in dist/*; do
+            case "${file#dist/}" in
+              "anarcism-${VERSION}.tar.gz" | "anarcism-${VERSION}-"*.whl) ;;
+              *)
+                echo "::error::${file#dist/} does not match release ${VERSION}"
+                exit 1
+                ;;
+            esac
+          done
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm:
+    name: Stage npm publish
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@revanta/anarcism/v/${{ needs.ci.outputs.version }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: anarcism-js
+          path: packages/anarcism/dist
+          run-id: ${{ needs.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # `npm stage` needs npm 11.15 or later.
+      - name: Install npm with staged publishing
+        run: npm install --global npm@11.20.0
+
+      - name: Check the package matches the release
+        working-directory: packages/anarcism
+        env:
+          VERSION: ${{ needs.ci.outputs.version }}
+        run: |
+          test "$(node -p 'require("./package.json").version')" = "$VERSION"
+          npm pack --dry-run
+
+      - name: Stage the publish for approval
+        working-directory: packages/anarcism
+        run: npm stage publish
