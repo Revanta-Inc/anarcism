@@ -12,7 +12,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Moritz Onken <mo@revanta.bio>"]
-license = "LicenseRef-Proprietary"
+license = "Apache-2.0"
 repository = "https://github.com/revanta/anarcism"
 
 [workspace.dependencies]

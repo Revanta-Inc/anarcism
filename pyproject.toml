@@ -5,8 +5,8 @@ description = "ANARCI-compatible IMGT numbering for antibody and TCR variable do
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Moritz Onken", email = "mo@revanta.bio" }]
-license = "LicenseRef-Proprietary"
-license-files = ["THIRD_PARTY_NOTICES.md"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 keywords = ["antibody", "tcr", "imgt", "numbering", "anarci", "bioinformatics"]
 classifiers = [
 	"Development Status :: 3 - Alpha",
@@ -37,6 +37,7 @@ profile = "python"
 include = [
 	{ path = ".cargo/config.toml", format = "sdist" },
 	{ path = "assets/**/*", format = "sdist" },
+	{ path = "LICENSE", format = "sdist" },
 	{ path = "THIRD_PARTY_NOTICES.md", format = "sdist" },
 ]
 

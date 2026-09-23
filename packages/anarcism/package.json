@@ -2,7 +2,7 @@
 	"name": "anarcism",
 	"version": "0.1.0",
 	"description": "ANARCI-compatible IMGT numbering in WebAssembly for browsers and Node.js",
-	"license": "UNLICENSED",
+	"license": "Apache-2.0",
 	"files": [
 		"dist"
 	],

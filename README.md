@@ -149,4 +149,4 @@ The package build compiles `anarcism-wasm` for `wasm32-unknown-unknown`, optimiz
 
 ## License
 
-Third-party attributions and license text are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The repository's own licensing remains `UNLICENSED`/`LicenseRef-Proprietary`; no additional project license is implied.
+The project's own code is licensed under the Apache License 2.0; see [`LICENSE`](LICENSE). Third-party attributions and license texts are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The embedded profile and germline data have additional provenance and licensing considerations. Public distribution remains blocked until the IMGT-derived data question is resolved in writing.

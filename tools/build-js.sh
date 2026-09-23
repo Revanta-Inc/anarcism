@@ -27,5 +27,5 @@ cp \
   packages/anarcism/src/worker-pool.d.ts \
   packages/anarcism/src/worker.js \
   "$distribution/"
-cp THIRD_PARTY_NOTICES.md "$distribution/"
+cp LICENSE THIRD_PARTY_NOTICES.md "$distribution/"
 node tools/size-report.mjs

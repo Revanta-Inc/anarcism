@@ -3,7 +3,7 @@
 	"version": "0.1.0",
 	"private": true,
 	"description": "Workspace root for the anarcism JavaScript package and demo",
-	"license": "UNLICENSED",
+	"license": "Apache-2.0",
 	"workspaces": [
 		"packages/anarcism",
 		"demo"

@@ -10,6 +10,7 @@ const files = [
 	"packages/anarcism/dist/worker-pool.js",
 	"packages/anarcism/dist/worker-pool.d.ts",
 	"packages/anarcism/dist/worker.js",
+	"packages/anarcism/dist/LICENSE",
 	"packages/anarcism/dist/THIRD_PARTY_NOTICES.md",
 	"packages/anarcism/package.json",
 ];
