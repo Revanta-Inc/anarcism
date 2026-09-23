@@ -140,7 +140,7 @@ def test_alternative_hits_match_versioned_anarci_across_chain_families(corpus):
 
 
 def test_workers_match_the_serial_path(corpus):
-    inputs = [(case["id"], case["seq"]) for case, _ in corpus[:200]]
+    inputs = [(case["id"], case["seq"]) for case, _ in corpus[::7]]
     serial = anarcism.number_sequences(inputs)
     parallel = anarcism.number_sequences(inputs, workers=4)
     assert [r.to_dict() for r in parallel] == [r.to_dict() for r in serial]

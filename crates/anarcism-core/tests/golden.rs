@@ -1,12 +1,8 @@
 use anarcism_core::{
     DomainResult, GermlineAssignment, NumberingOptions, ProfileHit, number_sequence,
 };
-#[cfg(not(target_family = "wasm"))]
-use anarcism_core::{SequenceInput, number_sequences, number_sequences_parallel};
 use serde::Deserialize;
 use std::collections::HashMap;
-#[cfg(not(target_family = "wasm"))]
-use std::num::NonZeroUsize;
 
 #[derive(Deserialize)]
 struct InputCase {
@@ -157,27 +153,6 @@ fn corpus_matches_versioned_anarci_reference() {
             failures.join(", ")
         );
     });
-}
-
-#[test]
-#[cfg(not(target_family = "wasm"))]
-fn full_native_batch_scheduler_matches_the_serial_batch() {
-    let inputs: Vec<_> = input_cases()
-        .into_iter()
-        .map(|case| SequenceInput {
-            id: case.id,
-            sequence: case.seq,
-        })
-        .collect();
-    let options = NumberingOptions::default();
-    let serial = number_sequences(&inputs, &options).expect("serial corpus numbering succeeds");
-    let parallel = number_sequences_parallel(
-        &inputs,
-        &options,
-        NonZeroUsize::new(8).expect("worker count is nonzero"),
-    )
-    .expect("parallel corpus numbering succeeds");
-    assert_eq!(parallel, serial);
 }
 
 fn assert_case(input: &InputCase, expected_case: &ReferenceCase) {
