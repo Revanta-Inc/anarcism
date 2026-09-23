@@ -187,7 +187,11 @@ fn assert_case(input: &InputCase, expected_case: &ReferenceCase) {
         &input.seq,
         &NumberingOptions {
             assign_germline: true,
-            alternative_hit_count: 28,
+            alternative_hit_count: if strict_alternative_reference(&input.id) {
+                28
+            } else {
+                NumberingOptions::default().alternative_hit_count
+            },
             ..NumberingOptions::default()
         },
     )
