@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 @layer base {
-  html {
-    /* Light only, so native controls match the palette below. */
-    color-scheme: light;
-  }
+	html {
+		/* Light only, so native controls match the palette below. */
+		color-scheme: light;
+	}
 
-  body {
-    background-color: var(--color-zinc-50);
-    color: var(--color-zinc-900);
-  }
+	body {
+		background-color: var(--color-zinc-50);
+		color: var(--color-zinc-900);
+	}
 }

@@ -20,29 +20,29 @@ The release artifact requires WebAssembly SIMD128 but does not require WASM thre
 
 ```js
 import init, {
-  numberSequence,
-  numberSequences,
-  numberFasta,
-  validateAntibodyPair,
+	numberSequence,
+	numberSequences,
+	numberFasta,
+	validateAntibodyPair,
 } from "@revanta/anarcism";
 
 const engine = await init();
 
-engine.version;   // package version
-engine.chains();  // chain types present in the embedded profiles
+engine.version; // package version
+engine.chains(); // chain types present in the embedded profiles
 engine.species(); // species present in the embedded profiles
 
 const result = numberSequence(vh, {
-  allowedChains: ["H", "K", "L"],
-  allowedSpecies: ["human", "mouse"],
-  minBitScore: 80,
-  alternativeHitCount: 3,
-  assignGermline: true,
+	allowedChains: ["H", "K", "L"],
+	allowedSpecies: ["human", "mouse"],
+	minBitScore: 80,
+	alternativeHitCount: 3,
+	assignGermline: true,
 });
 
 const batch = numberSequences([
-  { id: "heavy", sequence: vh },
-  { id: "light", sequence: vl },
+	{ id: "heavy", sequence: vh },
+	{ id: "light", sequence: vl },
 ]);
 
 const fastaResults = numberFasta(`>heavy\n${vh}\n`);
@@ -70,8 +70,7 @@ The synchronous browser API remains single-threaded and requires no WASM threads
 
 ## Python use
 
-The Python wheel contains the same embedded Rust engine and has no runtime
-dependency on ANARCI, HMMER, or model files:
+The Python wheel contains the same embedded Rust engine and has no runtime dependency on ANARCI, HMMER, or model files:
 
 ```python
 import anarcism
@@ -83,9 +82,7 @@ batch = anarcism.number_sequences(
 )
 ```
 
-It installs the `ANARCI` compatibility command plus the `anarcism`
-package-native spelling; `python -m anarcism` is equivalent. The command uses
-ANARCI's vertical output by default and supports its IMGT-capable options:
+It installs the `ANARCI` compatibility command plus the `anarcism` package-native spelling; `python -m anarcism` is equivalent. The command uses ANARCI's vertical output by default and supports its IMGT-capable options:
 
 ```sh
 ANARCI -i EVQLVESGGGLVQPGGSLRLSC...
@@ -94,15 +91,7 @@ ANARCI -i sequences.fasta -o numbered --csv --assign_germline
 ANARCI -i sequences.fasta -r ig --use_species human
 ```
 
-`-i/--sequence`, `-o/--outfile`, `-s/--scheme` (`imgt` or `i`),
-`-r/--restrict`, `--csv`, `-p/--ncpu`, `--assign_germline`,
-`--use_species`, and `--bit_score_threshold` match ANARCI's flag names and
-output layout. Scores are rendered to one decimal place and E-values to two
-significant digits, matching the precision of ANARCI's HMMER text output.
-Other numbering schemes are intentionally rejected. `--hmmerpath` is
-inapplicable because the backend is embedded, and `--outfile_hits` is not yet
-exposed because the public result does not contain HMMER's full hit-table bias
-and coordinate fields.
+`-i/--sequence`, `-o/--outfile`, `-s/--scheme` (`imgt` or `i`), `-r/--restrict`, `--csv`, `-p/--ncpu`, `--assign_germline`, `--use_species`, and `--bit_score_threshold` match ANARCI's flag names and output layout. Scores are rendered to one decimal place and E-values to two significant digits, matching the precision of ANARCI's HMMER text output. Other numbering schemes are intentionally rejected. `--hmmerpath` is inapplicable because the backend is embedded, and `--outfile_hits` is not yet exposed because the public result does not contain HMMER's full hit-table bias and coordinate fields.
 
 ## Output conventions
 

@@ -1,15 +1,15 @@
 {
-  "name": "anarcism",
-  "version": "0.1.0",
-  "description": "Workspace root for the anarcism browser package and demo",
-  "type": "module",
-  "private": true,
-  "workspaces": [
-    "browser",
-    "demo"
-  ],
-  "license": "UNLICENSED",
-  "engines": {
-    "node": ">=20"
-  }
+	"name": "anarcism",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Workspace root for the anarcism browser package and demo",
+	"license": "UNLICENSED",
+	"workspaces": [
+		"browser",
+		"demo"
+	],
+	"type": "module",
+	"engines": {
+		"node": ">=20"
+	}
 }

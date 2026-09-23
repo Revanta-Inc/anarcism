@@ -19,7 +19,7 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 anarcism-core = { path = "../anarcism-core" }
 pyo3 = { version = "0.27.2", default-features = false, features = [
-    "abi3-py311",
-    "generate-import-lib",
-    "macros",
+	"abi3-py311",
+	"generate-import-lib",
+	"macros",
 ] }

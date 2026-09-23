@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/anarcism-core",
-    "crates/anarcism-modelgen",
-    "crates/anarcism-python",
-    "crates/anarcism-wasm",
+	"crates/anarcism-core",
+	"crates/anarcism-modelgen",
+	"crates/anarcism-python",
+	"crates/anarcism-wasm",
 ]
 resolver = "3"
 

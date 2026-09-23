@@ -1,23 +1,23 @@
 {
-  "compilerOptions": {
-    "strict": true,
-    "target": "ES2022",
-    "module": "preserve",
-    "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["node", "vite/client"],
-    "jsx": "react-jsx",
-    "jsxImportSource": "preact",
-    "allowImportingTsExtensions": true,
-    "verbatimModuleSyntax": true,
-    "noEmit": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true,
-    "paths": {
-      "@anarcism/*": ["../browser/dist/*"]
-    }
-  },
-  "include": ["src", "vite.config.ts"]
+	"compilerOptions": {
+		"strict": true,
+		"target": "ES2022",
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"lib": ["ES2022", "DOM", "DOM.Iterable"],
+		"types": ["node", "vite/client"],
+		"jsx": "react-jsx",
+		"jsxImportSource": "preact",
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": true,
+		"noEmit": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noFallthroughCasesInSwitch": true,
+		"skipLibCheck": true,
+		"paths": {
+			"@anarcism/*": ["../browser/dist/*"]
+		}
+	},
+	"include": ["src", "vite.config.ts"]
 }

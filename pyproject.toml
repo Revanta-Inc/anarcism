@@ -4,19 +4,17 @@ version = "0.1.0"
 description = "ANARCI-compatible IMGT numbering for antibody and TCR variable domains, with no external tools or data files"
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [
-    { name = "Moritz Onken", email = "mo@revanta.bio" }
-]
+authors = [{ name = "Moritz Onken", email = "mo@revanta.bio" }]
 license = "LicenseRef-Proprietary"
 license-files = ["THIRD_PARTY_NOTICES.md"]
 keywords = ["antibody", "tcr", "imgt", "numbering", "anarci", "bioinformatics"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Rust",
-    "Topic :: Scientific/Engineering :: Bio-Informatics",
-    "Typing :: Typed",
+	"Development Status :: 3 - Alpha",
+	"Intended Audience :: Science/Research",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Rust",
+	"Topic :: Scientific/Engineering :: Bio-Informatics",
+	"Typing :: Typed",
 ]
 dependencies = []
 
@@ -44,8 +42,8 @@ profile = "python"
 # wheel never needs, and shipping it would force that download on anyone
 # building from source. `rust-version` in the crate reports a too-old toolchain.
 include = [
-    { path = "assets/**/*", format = "sdist" },
-    { path = "THIRD_PARTY_NOTICES.md", format = "sdist" },
+	{ path = "assets/**/*", format = "sdist" },
+	{ path = "THIRD_PARTY_NOTICES.md", format = "sdist" },
 ]
 
 [dependency-groups]
@@ -53,13 +51,8 @@ include = [
 # backs the parity and comparison benchmarks; it is never a runtime dependency
 # of the published wheel. Install it alone, without building the extension:
 #   uv sync --locked --no-install-project --no-default-groups --group reference
-reference = [
-    "anarci==2026.2.13.2",
-]
-dev = [
-    "maturin>=1.9,<2.0",
-    "pytest>=8.4.2",
-]
+reference = ["anarci==2026.2.13.2"]
+dev = ["maturin>=1.9,<2.0", "pytest>=8.4.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
