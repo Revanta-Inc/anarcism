@@ -34,7 +34,7 @@ try {
 			const moduleBytes = await (await fetch("/anarcism.wasm")).arrayBuffer();
 			const module = await WebAssembly.compile(moduleBytes);
 			let started = performance.now();
-			await globalThis.anarcismApi.default(module);
+			globalThis.anarcismApi = await globalThis.Anarcism.create({ source: module });
 			const cachedInitializationMs = performance.now() - started;
 
 			for (let index = 0; index < config.warmupIterations; index += 1) {
@@ -67,12 +67,11 @@ try {
 			assertBatch(batch, inputs.length);
 
 			const { AnarcismWorkerPool } = await import("/worker-pool.js");
-			const pool = new AnarcismWorkerPool();
+			started = performance.now();
+			const pool = await AnarcismWorkerPool.create({ workers: config.poolWorkerCount });
+			const poolInitializationMs = performance.now() - started;
 			let workerPool;
 			try {
-				started = performance.now();
-				await pool.initialize(config.poolWorkerCount);
-				const poolInitializationMs = performance.now() - started;
 				const poolWarmupInputs = inputs.slice(
 					0,
 					Math.min(inputs.length, config.poolWorkerCount * 2),

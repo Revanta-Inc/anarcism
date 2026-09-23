@@ -22,7 +22,7 @@ export function normalizeWorkerCount(value, maxWorkers = DEFAULT_MAX_WORKERS) {
 	return Math.min(maximum, Math.max(1, Number.isFinite(count) ? count : 1));
 }
 
-export class AnalysisWorkerPool {
+export class AnarcismWorkerPool {
 	#busy = false;
 	#maxWorkers;
 	#metadata;
@@ -30,16 +30,27 @@ export class AnalysisWorkerPool {
 	#workers = [];
 	#workerUrl;
 
-	constructor(
-		workerUrl = new URL("./worker.js", import.meta.url),
-		{
-			maxWorkers = DEFAULT_MAX_WORKERS,
-			workerFactory = (url, options) => new Worker(url, options),
-		} = {},
-	) {
+	constructor({ workerUrl, maxWorkers, workerFactory }) {
 		this.#workerUrl = workerUrl;
 		this.#maxWorkers = normalizeWorkerCount(maxWorkers, Number.MAX_SAFE_INTEGER);
 		this.#workerFactory = workerFactory;
+	}
+
+	static async create({
+		workers = recommendedWorkerCount(),
+		workerUrl = new URL("./worker.js", import.meta.url),
+		maxWorkers = DEFAULT_MAX_WORKERS,
+		workerFactory = (url, options) => new Worker(url, options),
+		signal,
+	} = {}) {
+		signal?.throwIfAborted();
+		const pool = new AnarcismWorkerPool({
+			workerUrl,
+			maxWorkers,
+			workerFactory,
+		});
+		await pool.resize(workers, { signal });
+		return pool;
 	}
 
 	get busy() {
@@ -50,14 +61,23 @@ export class AnalysisWorkerPool {
 		return this.#workers.length;
 	}
 
-	initialize(workerCount = recommendedWorkerCount()) {
-		return this.resize(workerCount);
+	get version() {
+		return this.#metadata.version;
 	}
 
-	async resize(value) {
+	chains() {
+		return [...this.#metadata.chains];
+	}
+
+	species() {
+		return [...this.#metadata.species];
+	}
+
+	async resize(value, { signal } = {}) {
 		if (this.#busy) {
 			throw makeError("POOL_BUSY", "cannot resize the worker pool during analysis");
 		}
+		signal?.throwIfAborted();
 
 		const started = performance.now();
 		const targetSize = normalizeWorkerCount(value, this.#maxWorkers);
@@ -68,13 +88,13 @@ export class AnalysisWorkerPool {
 		const originalSize = this.#workers.length;
 		try {
 			while (this.#workers.length < targetSize) {
-				const index = this.#workers.length;
-				this.#workers.push(
-					new WorkerClient(this.#workerFactory, this.#workerUrl, `anarcism-${index + 1}`),
-				);
+				this.#workers.push(this.#spawnWorker(this.#workers.length));
 			}
 
-			const metadata = await Promise.all(this.#workers.map((worker) => worker.ready));
+			const metadata = await abortable(
+				Promise.all(this.#workers.map((worker) => worker.ready)),
+				signal,
+			);
 			assertMatchingMetadata(metadata);
 			this.#metadata = metadata[0];
 		} catch (error) {
@@ -89,71 +109,70 @@ export class AnalysisWorkerPool {
 		};
 	}
 
-	async numberSequence(sequence, options = {}) {
-		const response = await this.#numberSingle(sequence, options);
+	async numberSequence(sequence, { signal, ...options } = {}) {
+		const response = await this.#requestOne(
+			{
+				type: "number",
+				text: sequence,
+				options,
+			},
+			signal,
+		);
 		return response.results[0];
 	}
 
-	async numberSequences(inputs, options = {}) {
-		return (await this.#numberInputs(inputs, options)).results;
+	async validateAntibodyPair(vh, vl, { signal, ...options } = {}) {
+		const response = await this.#requestOne(
+			{
+				type: "validatePair",
+				vh,
+				vl,
+				options,
+			},
+			signal,
+		);
+		return response.value;
 	}
 
-	async numberFasta(fasta, options = {}) {
-		return (await this.#numberInputs(parseFasta(fasta), options)).results;
+	async numberSequences(inputs, { signal, ...options } = {}) {
+		return (await this.#numberInputs(inputs, options, signal)).results;
+	}
+
+	async numberFasta(fasta, { signal, ...options } = {}) {
+		signal?.throwIfAborted();
+		return (await this.#numberInputs(parseFasta(fasta), options, signal)).results;
 	}
 
 	terminate() {
 		for (const worker of this.#workers.splice(0)) worker.terminate();
-		this.#metadata = undefined;
 	}
 
-	async #numberSingle(sequence, options) {
-		if (!this.#workers.length) {
-			throw makeError("NOT_INITIALIZED", "initialize the worker pool before numbering");
-		}
-		if (this.#busy) {
-			throw makeError("POOL_BUSY", "the worker pool is already numbering a batch");
-		}
-
-		this.#busy = true;
-		try {
-			const response = await this.#workers[0].request({
-				type: "number",
-				text: sequence,
-				options,
-			});
-			return { ...response, workersUsed: 1 };
-		} finally {
-			this.#busy = false;
-		}
+	#requestOne(message, signal) {
+		return this.#exclusive(signal, () => this.#workers[0].request(message, signal));
 	}
 
-	async #numberInputs(inputs, options) {
-		if (!this.#workers.length) {
-			throw makeError("NOT_INITIALIZED", "initialize the worker pool before numbering");
-		}
-		if (this.#busy) {
-			throw makeError("POOL_BUSY", "the worker pool is already numbering a batch");
-		}
+	#numberInputs(inputs, options, signal) {
 		if (inputs.length > MAX_BATCH_SIZE) {
 			throw makeError(
 				"BATCH_TOO_LARGE",
 				`batch contains ${inputs.length} records; configured limit is ${MAX_BATCH_SIZE}`,
 			);
 		}
-		if (!inputs.length) return { results: [], computeMs: 0, workersUsed: 0 };
+		return this.#exclusive(signal, async () => {
+			if (!inputs.length) return { results: [], computeMs: 0, workersUsed: 0 };
 
-		this.#busy = true;
-		try {
 			const workerCount = Math.min(inputs.length, this.#workers.length);
 			const shards = balanceInputs(inputs, workerCount);
 			const settledResponses = await Promise.allSettled(
 				shards.map((shard, index) =>
-					this.#workers[index].request({
-						type: "numberBatch",
-						inputs: shard.map((item) => item.input),
-						options,
-					}),
+					this.#workers[index].request(
+						{
+							type: "numberBatch",
+							inputs: shard.map((item) => item.input),
+							options,
+						},
+						signal,
+					),
 				),
 			);
 			const failedResponse = settledResponses.find((response) => response.status === "rejected");
@@ -177,13 +196,56 @@ export class AnalysisWorkerPool {
 				computeMs: Math.max(...responses.map((response) => response.computeMs)),
 				workersUsed: workerCount,
 			};
+		});
+	}
+
+	// WASM calls cannot be interrupted, so an aborted request replaces the
+	// workers still computing it and leaves the pool at its current size.
+	async #exclusive(signal, operation) {
+		if (!this.#workers.length) {
+			throw makeError("TERMINATED", "the worker pool has been terminated");
+		}
+		if (this.#busy) {
+			throw makeError("POOL_BUSY", "the worker pool is already numbering a batch");
+		}
+		signal?.throwIfAborted();
+
+		this.#busy = true;
+		try {
+			return await abortable(operation(), signal);
+		} catch (error) {
+			if (signal?.aborted) this.#replaceBusyWorkers();
+			throw error;
 		} finally {
 			this.#busy = false;
 		}
 	}
+
+	#replaceBusyWorkers() {
+		this.#workers = this.#workers.map((worker, index) => {
+			if (!worker.busy) return worker;
+			worker.terminate();
+			return this.#spawnWorker(index);
+		});
+	}
+
+	#spawnWorker(index) {
+		return new WorkerClient(this.#workerFactory, this.#workerUrl, `anarcism-${index + 1}`);
+	}
 }
 
-export { AnalysisWorkerPool as AnarcismWorkerPool };
+function abortable(promise, signal) {
+	if (!signal) return promise;
+	return new Promise((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		if (signal.aborted) {
+			onAbort();
+			return;
+		}
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	});
+}
 
 export function parseFasta(input) {
 	const inputBytes = utf8Encoder.encode(input).byteLength;
@@ -282,6 +344,9 @@ class WorkerClient {
 			this.#resolveReady = resolve;
 			this.#rejectReady = reject;
 		});
+		// Replacement workers may fail before anyone awaits them; requests still
+		// observe the rejection.
+		this.#ready.catch(() => {});
 		this.#worker = workerFactory(workerUrl, { type: "module", name });
 		this.#worker.addEventListener("message", (event) => this.#handleMessage(event.data));
 		this.#worker.addEventListener("error", (event) => {
@@ -296,8 +361,13 @@ class WorkerClient {
 		return this.#ready;
 	}
 
-	async request(message) {
+	get busy() {
+		return this.#pending.size > 0;
+	}
+
+	async request(message, signal) {
 		await this.#ready;
+		signal?.throwIfAborted();
 		if (!this.#alive) {
 			throw makeError("WORKER_FAILED", "the analysis worker is unavailable");
 		}

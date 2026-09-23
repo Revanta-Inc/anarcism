@@ -61,18 +61,20 @@ export function App() {
 	// One worker keeps single-sequence latency low; FASTA batches grow the pool
 	// lazily in `run`.
 	useEffect(() => {
-		const analysisPool = createAnalysisPool();
-		pool.current = analysisPool;
 		const started = performance.now();
 		let cancelled = false;
 
-		analysisPool.initialize(1).then(
-			(metadata) => {
-				if (cancelled) return;
+		createAnalysisPool(1).then(
+			(analysisPool) => {
+				if (cancelled) {
+					analysisPool.terminate();
+					return;
+				}
+				pool.current = analysisPool;
 				setTimings({ initMs: performance.now() - started });
-				setVersion(metadata.version);
-				setChains(metadata.chains);
-				setSpecies(metadata.species);
+				setVersion(analysisPool.version);
+				setChains(analysisPool.chains());
+				setSpecies(analysisPool.species());
 				setPoolSize(analysisPool.size);
 				setReady(true);
 				setBusy(null);
@@ -86,7 +88,8 @@ export function App() {
 
 		return () => {
 			cancelled = true;
-			analysisPool.terminate();
+			pool.current?.terminate();
+			pool.current = null;
 		};
 	}, []);
 

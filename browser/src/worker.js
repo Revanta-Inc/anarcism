@@ -1,10 +1,33 @@
-import init from "./index.js";
+import { Anarcism } from "./index.js";
 
 const initialization = initialize();
 
+// Map lookup cannot resolve inherited handler names.
+const handlers = new Map([
+	[
+		"number",
+		(engine, request) => ({
+			results: [engine.numberSequence(request.text, request.options)],
+		}),
+	],
+	[
+		"numberBatch",
+		(engine, request) => ({
+			results: engine.numberSequences(request.inputs, request.options),
+		}),
+	],
+	[
+		"validatePair",
+		(engine, request) => ({
+			value: engine.validateAntibodyPair(request.vh, request.vl, request.options),
+		}),
+	],
+]);
+
 self.addEventListener("message", async (event) => {
 	const request = event.data;
-	if (request?.type !== "number" && request?.type !== "numberBatch") return;
+	const handler = handlers.get(request?.type);
+	if (!handler) return;
 
 	const engine = await initialization;
 	if (!engine) {
@@ -21,14 +44,10 @@ self.addEventListener("message", async (event) => {
 
 	const started = performance.now();
 	try {
-		const results =
-			request.type === "numberBatch"
-				? engine.numberSequences(request.inputs, request.options)
-				: [engine.numberSequence(request.text, request.options)];
 		self.postMessage({
 			type: "result",
 			requestId: request.requestId,
-			results,
+			...handler(engine, request),
 			computeMs: performance.now() - started,
 		});
 	} catch (error) {
@@ -43,7 +62,7 @@ self.addEventListener("message", async (event) => {
 async function initialize() {
 	const started = performance.now();
 	try {
-		const engine = await init();
+		const engine = await Anarcism.create();
 		self.postMessage({
 			type: "ready",
 			initMs: performance.now() - started,

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 
-import init, { numberSequence, numberSequences } from "../dist/index.js";
+import { Anarcism } from "../dist/index.js";
 
 const VH =
 	"EVQLQQSGAEVVRSGASVKLSCTASGFNIKDYYIHWVKQRPEKGLEWIGWIDPEIGDTEYVPKFQGKATMTADTSSNTAYLQLSSLTSEDTAVYYCNAGHDYDRGRFPYWGQGTLVTVSAA";
@@ -10,24 +10,24 @@ const VL =
 const wasm = await readFile(new URL("../dist/anarcism.wasm", import.meta.url));
 
 let started = performance.now();
-await init(wasm);
+const anarcism = await Anarcism.create({ source: wasm });
 const coldInitializationMs = performance.now() - started;
 
 const module = await WebAssembly.compile(wasm);
 started = performance.now();
-await init(module);
+await Anarcism.create({ source: module });
 const cachedInitializationMs = performance.now() - started;
 
 for (let index = 0; index < 3; index += 1) {
-	numberSequence(VH);
-	numberSequence(VL);
+	anarcism.numberSequence(VH);
+	anarcism.numberSequence(VL);
 }
 
 function distribution(sequence, iterations = 25) {
 	const samples = [];
 	for (let index = 0; index < iterations; index += 1) {
 		const before = performance.now();
-		numberSequence(sequence);
+		anarcism.numberSequence(sequence);
 		samples.push(performance.now() - before);
 	}
 	samples.sort((left, right) => left - right);
@@ -42,7 +42,7 @@ const inputs = Array.from({ length: 100 }, (_, pairIndex) => [
 	{ id: `vl-${pairIndex}`, sequence: VL },
 ]).flat();
 started = performance.now();
-numberSequences(inputs);
+anarcism.numberSequences(inputs);
 const hundredPairsMs = performance.now() - started;
 
 console.log(

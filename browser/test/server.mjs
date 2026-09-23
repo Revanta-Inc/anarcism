@@ -3,16 +3,13 @@ import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, resolve } from "node:path";
 
-const browserRoot = resolve(import.meta.dirname, "..");
-// The package is served flat, so `worker-pool.js` resolves `./worker.js`, and
-// the worker resolves `./index.js` and `./anarcism.wasm`, exactly as they do
-// from an installed `@revanta/anarcism`.
+const packageRoot = resolve(import.meta.dirname, "..");
 const routes = new Map([
 	["/", resolve(import.meta.dirname, "fixture.html")],
-	["/index.js", resolve(browserRoot, "dist/index.js")],
-	["/worker-pool.js", resolve(browserRoot, "dist/worker-pool.js")],
-	["/worker.js", resolve(browserRoot, "dist/worker.js")],
-	["/anarcism.wasm", resolve(browserRoot, "dist/anarcism.wasm")],
+	["/index.js", resolve(packageRoot, "dist/index.js")],
+	["/worker-pool.js", resolve(packageRoot, "dist/worker-pool.js")],
+	["/worker.js", resolve(packageRoot, "dist/worker.js")],
+	["/anarcism.wasm", resolve(packageRoot, "dist/anarcism.wasm")],
 ]);
 const contentTypes = new Map([
 	[".html", "text/html; charset=utf-8"],

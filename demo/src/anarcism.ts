@@ -1,4 +1,4 @@
-import { AnalysisWorkerPool } from "@anarcism/worker-pool.js";
+import { AnarcismWorkerPool } from "@anarcism/worker-pool.js";
 import workerUrl from "@anarcism/worker.js?worker&url";
 
 export {
@@ -9,7 +9,7 @@ export {
 } from "@anarcism/worker-pool.js";
 
 export type { WorkerPoolMetadata } from "@anarcism/worker-pool.js";
-export type AnalysisPool = AnalysisWorkerPool;
+export type AnalysisPool = AnarcismWorkerPool;
 export type {
 	ChainType,
 	DomainResult,
@@ -18,11 +18,9 @@ export type {
 	SequenceResult,
 } from "@anarcism/index.js";
 
-// The published pool resolves `./worker.js` against its own module URL, which
-// only holds while the package stays unbundled. Vite emits the worker as a
-// separate bundle, so the pool is handed that URL instead.
-export function createAnalysisPool(): AnalysisWorkerPool {
-	return new AnalysisWorkerPool(workerUrl);
+// Vite must supply the worker URL after bundling.
+export function createAnalysisPool(workers: number): Promise<AnarcismWorkerPool> {
+	return AnarcismWorkerPool.create({ workerUrl, workers });
 }
 
 export function errorCode(error: unknown): string {

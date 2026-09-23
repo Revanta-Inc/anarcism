@@ -23,7 +23,10 @@ export interface ProfileHit {
 	chainType: ChainType;
 	species: string;
 	bitScore: number;
-	eValue?: number;
+	eValue: number;
+	bias: number;
+	queryStart: number;
+	queryEnd: number;
 }
 
 export interface GermlineAssignment {
@@ -42,7 +45,10 @@ export interface DomainResult {
 	start: number;
 	end: number;
 	bitScore: number;
-	eValue?: number;
+	eValue: number;
+	bias: number;
+	queryStart: number;
+	queryEnd: number;
 	numbering: NumberedResidue[];
 	paddedImgtAlignment: string;
 	alternativeHits: ProfileHit[];
@@ -68,7 +74,34 @@ export interface PairValidationResult {
 	errors: string[];
 }
 
-export interface AnarcismApi {
+export class AnarcismError extends Error {
+	readonly code: string;
+	readonly inputId?: string;
+}
+
+export type WasmSource =
+	| ArrayBuffer
+	| ArrayBufferView
+	| WebAssembly.Module
+	| Response
+	| Request
+	| URL
+	| string;
+
+export interface AbortOptions {
+	/** Rejects the call with `signal.reason` when aborted. */
+	signal?: AbortSignal;
+}
+
+export interface CreateOptions extends AbortOptions {
+	/** Where to load the engine from; defaults to the `anarcism.wasm` shipped next to this module. */
+	source?: WasmSource;
+}
+
+export class Anarcism {
+	private constructor();
+	static create(options?: CreateOptions): Promise<Anarcism>;
+	static createSync(source: ArrayBuffer | ArrayBufferView | WebAssembly.Module): Anarcism;
 	readonly version: string;
 	chains(): ChainType[];
 	species(): string[];
@@ -84,33 +117,3 @@ export interface AnarcismApi {
 		options?: PairValidationOptions,
 	): PairValidationResult;
 }
-
-export class AnarcismError extends Error {
-	readonly code: string;
-	readonly inputId?: string;
-}
-
-export type WasmSource =
-	| ArrayBuffer
-	| ArrayBufferView
-	| WebAssembly.Module
-	| Response
-	| Request
-	| URL
-	| string;
-
-export function init(source?: WasmSource): Promise<AnarcismApi>;
-export function initSync(source: ArrayBuffer | ArrayBufferView | WebAssembly.Module): AnarcismApi;
-export function numberSequence(sequence: string, options?: NumberingOptions): SequenceResult;
-export function numberSequences(
-	inputs: Array<{ id: string; sequence: string }>,
-	options?: NumberingOptions,
-): SequenceResult[];
-export function numberFasta(fasta: string, options?: NumberingOptions): SequenceResult[];
-export function validateAntibodyPair(
-	vh: string,
-	vl: string,
-	options?: PairValidationOptions,
-): PairValidationResult;
-
-export default init;
