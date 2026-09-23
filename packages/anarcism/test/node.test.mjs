@@ -19,7 +19,7 @@ test.before(async () => {
 
 test("synchronous initialization accepts bytes and compiled modules", () => {
 	const bytesApi = Anarcism.createSync(wasm);
-	assert.equal(bytesApi.version, "0.1.0");
+	assert.equal(bytesApi.version, "1.0.0");
 	assert.deepEqual(bytesApi.chains(), ["H", "K", "L", "A", "B", "G", "D"]);
 	assert.deepEqual(bytesApi.species(), [
 		"human",

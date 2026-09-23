@@ -13,7 +13,7 @@ source = { git = "https://github.com/oxpig/ANARCI.git?rev=79f6c575056dedef86cb8f
 
 [[package]]
 name = "anarcism"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "." }
 
 [package.dev-dependencies]

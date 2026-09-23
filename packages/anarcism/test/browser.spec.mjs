@@ -28,7 +28,7 @@ test("initializes one embedded engine per module worker", async ({ page }) => {
 	});
 
 	expect(metadata.workerCount).toBe(2);
-	expect(metadata.version).toBe("0.1.0");
+	expect(metadata.version).toBe("1.0.0");
 	expect(metadata.chains).toEqual(["H", "K", "L", "A", "B", "G", "D"]);
 	expect(metadata.species).toEqual([
 		"human",
