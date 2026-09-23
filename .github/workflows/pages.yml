@@ -1,7 +1,10 @@
 name: Pages
 
+# Deploys the demo that CI built, so Pages never rebuilds the package.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -10,64 +13,43 @@ permissions:
 
 concurrency:
   group: pages
-  # A superseded deployment is still a deployment: let it finish rather than
-  # leaving the site half-published.
   cancel-in-progress: false
-
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  # Must match `ci.yml` and `docs/build-release.md`: `wasm-opt` output is not
-  # stable across Binaryen versions, and `tools/build-browser.sh` gates on size.
-  BINARYEN_VERSION: 132
 
 jobs:
   build:
+    if: >-
+      github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
+    permissions:
+      actions: read
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install the pinned Rust toolchain
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install Binaryen ${{ env.BINARYEN_VERSION }}
+      - name: Select the CI run
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          version="${BINARYEN_VERSION}"
-          curl -fsSL --retry 3 \
-            "https://github.com/WebAssembly/binaryen/releases/download/version_${version}/binaryen-version_${version}-x86_64-linux.tar.gz" \
-            | tar xz -C /opt
-          echo "/opt/binaryen-version_${version}/bin" >> "$GITHUB_PATH"
+          # Manual runs redeploy the latest successful CI build of main.
+          run_id="${EVENT_RUN_ID}"
+          if [[ -z "$run_id" ]]; then
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+              --branch main --event push --status success --limit 1 \
+              --json databaseId --jq '.[0].databaseId')"
+          fi
+          test -n "$run_id"
+          echo "run-id=${run_id}" >> "$GITHUB_OUTPUT"
 
-      - name: Install JavaScript dependencies
-        run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          name: anarcism-demo
+          path: demo-dist
+          run-id: ${{ steps.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
 
-      # The demo imports `browser/dist`, which is a build artifact and is not
-      # committed, so the WASM package is built first.
-      - name: Build the browser package
-        run: tools/build-browser.sh
-
-      - name: Build the demo
-        working-directory: demo
-        run: npm run build
-
-      # No `configure-pages` step: Pages is set to the GitHub Actions source in
-      # the repository settings, and the demo builds with a relative `base`, so
-      # nothing here needs the base path that action exports. Leaving it out
-      # keeps this job on the default `contents: read` token.
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: demo/dist
+          path: demo-dist
 
   deploy:
     needs: build

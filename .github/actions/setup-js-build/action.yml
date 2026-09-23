@@ -1,0 +1,36 @@
+name: Set up the JavaScript package build
+description: Install the pinned Rust toolchain, Binaryen, and Node.js, then install npm dependencies.
+
+inputs:
+  binaryen-version:
+    description: Binaryen release used by tools/build-js.sh to optimize the WebAssembly module.
+    default: "132"
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Rust toolchain
+      shell: bash
+      run: rustup toolchain install
+
+    - uses: Swatinem/rust-cache@v2
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: npm
+        cache-dependency-path: package-lock.json
+
+    - name: Install Binaryen ${{ inputs.binaryen-version }}
+      shell: bash
+      env:
+        BINARYEN_VERSION: ${{ inputs.binaryen-version }}
+      run: |
+        curl -fsSL --retry 3 \
+          "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+          | tar xz -C /opt
+        echo "/opt/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+    - name: Install JavaScript dependencies
+      shell: bash
+      run: npm ci

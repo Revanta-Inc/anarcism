@@ -22,7 +22,7 @@
 	"scripts": {
 		"build": "../../tools/build-js.sh",
 		"test": "node --test test/node.test.mjs",
-		"test:browsers": "playwright test",
+		"test:browser": "playwright test",
 		"test:types": "tsc --noEmit",
 		"benchmark": "node bench/benchmark.mjs",
 		"benchmark:browser": "node bench/browser-benchmark.mjs",

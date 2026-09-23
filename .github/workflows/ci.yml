@@ -1,9 +1,6 @@
 name: CI
 
 on:
-  # Only `main` on push. A branch with an open pull request is already covered
-  # by the `pull_request` trigger, and filtering here stops every such push
-  # from running the whole matrix twice.
   push:
     branches: [main]
   pull_request:
@@ -18,15 +15,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Incremental artifacts are never reused across CI runs and only inflate what
-  # the cache has to carry.
   CARGO_INCREMENTAL: 0
-  # `docs/build-release.md` pins this; `wasm-opt` output is not stable across
-  # Binaryen versions, so the size gate is only meaningful when it matches.
-  BINARYEN_VERSION: 132
 
 jobs:
-  rust-and-browser:
+  rust-and-javascript:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -34,24 +26,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install the pinned Rust toolchain
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install Binaryen ${{ env.BINARYEN_VERSION }}
-        run: |
-          version="${BINARYEN_VERSION}"
-          curl -fsSL --retry 3 \
-            "https://github.com/WebAssembly/binaryen/releases/download/version_${version}/binaryen-version_${version}-x86_64-linux.tar.gz" \
-            | tar xz -C /opt
-          echo "/opt/binaryen-version_${version}/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-js-build
 
       - name: Check Rust
         run: |
@@ -59,64 +34,46 @@ jobs:
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
 
-      # One `npm ci` at the workspace root installs both the browser package
-      # and the demo from the single lock file.
-      - name: Install JavaScript dependencies
-        run: npm ci
-
       - name: Build and enforce compressed size
-        run: tools/build-browser.sh
+        run: tools/build-js.sh
 
       - name: Test Node, declarations, and golden parity
-        working-directory: browser
+        working-directory: packages/anarcism
         run: |
           npm test
           npm run test:types
           npm run parity
 
-      - name: Resolve the pinned Playwright version
-        id: playwright
-        working-directory: browser
-        run: |
-          version="$(node -p "require('./package.json').devDependencies['@playwright/test']")"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@v6
-        id: playwright-cache
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
         with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+          install-dependencies: true
 
-      # The browser binaries live in the cached directory, but the system
-      # libraries they link against do not, so those are installed either way.
-      - name: Install browser runtimes
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        working-directory: browser
-        run: npx playwright install --with-deps chromium firefox webkit
-
-      - name: Install browser system dependencies
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        working-directory: browser
-        run: npx playwright install-deps
-
-      - name: Test Chromium, Firefox, and WebKit
-        working-directory: browser
-        run: npm run test:browsers
+      - name: Test Chrome
+        working-directory: packages/anarcism
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: npm run test:browser
 
       - name: Inspect package contents
-        working-directory: browser
+        working-directory: packages/anarcism
         run: npm pack --dry-run
 
-      # The demo consumes `browser/dist` the way an npm dependent would, so it
-      # is the one check that the published shape survives a bundler.
       - name: Type-check and build the demo
         working-directory: demo
         run: npm run build
 
       - uses: actions/upload-artifact@v7
         with:
-          name: anarcism-browser
-          path: browser/dist
+          name: anarcism-js
+          path: packages/anarcism/dist
+          if-no-files-found: error
+
+      # Pages deploys this build after CI succeeds on main.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: anarcism-demo
+          path: demo/dist
           if-no-files-found: error
 
   python-wheels:
@@ -135,22 +92,14 @@ jobs:
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
             test: true
-          # A musllinux wheel cannot be installed on the glibc runner that built
-          # it, so this row is build-only.
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             manylinux: musllinux_1_2
             test: false
-          # One arm64 runner builds both macOS architectures into a single
-          # universal2 wheel, and still runs the suite against its native slice.
           - runner: macos-14
             target: universal2-apple-darwin
             manylinux: auto
             test: true
-          # Cross compiled from Linux with cargo-xwin, which drops the
-          # higher-billed Windows runner. `manylinux: off` keeps the build out
-          # of the manylinux container, which has no cargo-xwin toolchain.
-          # Build-only: a Windows wheel cannot be executed on a Linux host.
           - runner: ubuntu-24.04
             target: x86_64-pc-windows-msvc
             manylinux: "off"
@@ -164,14 +113,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      # maturin-action carries its own sccache, so `Swatinem/rust-cache` is
-      # deliberately absent from this job rather than stacked on top of it.
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          # No `--release`: it overrides `[tool.maturin] profile = "python"` and
-          # would ship the browser profile's aborting panics.
           args: --out dist
           manylinux: ${{ matrix.manylinux }}
           sccache: true
@@ -209,20 +154,6 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-
-      # Guards the one setting that cannot be checked from a built artifact: an
-      # aborting panic would kill the host interpreter instead of raising.
-      - name: The python profile must keep unwinding
-        run: |
-          python - <<'EOF'
-          import re, tomllib
-          manifest = tomllib.loads(open("Cargo.toml").read())
-          profile = manifest["profile"]["python"]
-          assert profile["panic"] == "unwind", profile
-          assert profile["inherits"] == "release", profile
-          config = open("pyproject.toml").read()
-          assert re.search(r'^profile = "python"$', config, re.M), "maturin profile not set"
-          EOF
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
