@@ -192,8 +192,8 @@ export function App() {
 					/>
 				</h1>
 				<p class="max-w-2xl text-sm text-zinc-600">
-					Antibody and TCR variable-domain recognition and IMGT numbering, running in a configurable
-					pool of dedicated workers. Sequences never leave this tab.
+					Antibody and TCR variable-domain recognition and IMGT numbering. Sequences never leave
+					this tab.
 				</p>
 			</header>
 
@@ -321,7 +321,7 @@ export function App() {
 						disabled={disabled}
 						onClick={() => void run(sequence)}
 					>
-						{busy ?? "Number"}
+						Number
 					</button>
 
 					<dl class="flex flex-wrap gap-x-4 gap-y-1 border-t border-zinc-200 pt-3 text-xs text-zinc-500">
