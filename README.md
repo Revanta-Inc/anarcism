@@ -4,7 +4,7 @@
 
 # anarcism
 
-`anarcism` recognizes and IMGT-numbers antibody and T-cell-receptor variable domains. The engine is written in Rust and ships as a self-contained Python extension and WebAssembly package: analysis runs locally, with no HMMER binary, model download, or backend request.
+`anarcism` is an independent reimplementation of [ANARCI](https://github.com/oxpig/ANARCI) by James Dunbar and Charlotte M. Deane. It recognizes and IMGT-numbers antibody and T-cell-receptor variable domains. The engine is written in Rust and ships as a self-contained Python extension and WebAssembly package: analysis runs locally, with no HMMER binary, model download, or backend request.
 
 It supports H/K/L/A/B/G/D chains, multidomain inputs, FASTA, configurable profile filters, alternative hits, V/J germline assignment, and VH/VL pair validation.
 
@@ -142,6 +142,26 @@ npm --workspace demo run dev
 ```
 
 The package build compiles `anarcism-wasm` for `wasm32-unknown-unknown`, optimizes it with `wasm-opt -Oz`, copies the JavaScript entry points, declarations, and license files next to it in `packages/anarcism/dist/`, and prints the size report.
+
+## Attribution and citation
+
+anarcism reproduces the methods and data of the projects below. If you use it in published work, please cite them.
+
+- **ANARCI** (Oxford Protein Informatics Group) defines the recognition, receptor classification, and numbering that anarcism reimplements. anarcism is validated against [oxpig/ANARCI](https://github.com/oxpig/ANARCI) at commit `79f6c575056dedef86cb8f405ebb039197923eec`, and its embedded profile HMMs and germline tables are generated with ANARCI's own build pipeline.
+
+  Dunbar J, Deane CM. ANARCI: antigen receptor numbering and receptor classification. _Bioinformatics_ 32(2):298–300 (2016). [doi:10.1093/bioinformatics/btv552](https://doi.org/10.1093/bioinformatics/btv552)
+
+- **HMMER** 3.4 (Sean R. Eddy and the HMMER developers) provides the profile-HMM search and scoring that ANARCI relies on. anarcism reimplements the parts ANARCI uses and is validated against HMMER 3.4.
+
+  Eddy SR. Accelerated profile HMM searches. _PLoS Computational Biology_ 7(10):e1002195 (2011). [doi:10.1371/journal.pcbi.1002195](https://doi.org/10.1371/journal.pcbi.1002195)
+
+- **IMGT®**, the international ImMunoGeneTics information system® (Marie-Paule Lefranc and colleagues), defines the IMGT numbering scheme and supplies the germline sequences, from IMGT/GENE-DB release `202638-7`.
+
+  Lefranc M-P, Pommié C, Ruiz M, Giudicelli V, Foulquier E, Truong L, Thouvenin-Contet V, Lefranc G. IMGT unique numbering for immunoglobulin and T cell receptor variable domains and Ig superfamily V-like domains. _Developmental & Comparative Immunology_ 27(1):55–77 (2003). [doi:10.1016/S0145-305X(02)00039-3](<https://doi.org/10.1016/S0145-305X(02)00039-3>)
+
+  Giudicelli V, Chaume D, Lefranc M-P. IMGT/GENE-DB: a comprehensive database for human and mouse immunoglobulin and T cell receptor genes. _Nucleic Acids Research_ 33:D256–D261 (2005). [doi:10.1093/nar/gki010](https://doi.org/10.1093/nar/gki010)
+
+License texts and data provenance for all three are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## License
 

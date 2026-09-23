@@ -1,0 +1,91 @@
+cff-version: 1.2.0
+message: >-
+  If you use anarcism, please cite it together with ANARCI, HMMER, and IMGT, whose methods and data it reimplements. Their references are listed below.
+title: anarcism
+type: software
+abstract: >-
+  Independent reimplementation of ANARCI that recognizes and IMGT-numbers antibody and T-cell-receptor variable domains, with a self-contained Rust engine for Python and WebAssembly.
+authors:
+  - given-names: Moritz
+    family-names: Onken
+    affiliation: Revanta Inc
+version: 1.0.0
+license: Apache-2.0
+repository-code: "https://github.com/revanta-inc/anarcism"
+keywords:
+  - antibody
+  - T-cell receptor
+  - IMGT
+  - numbering
+  - ANARCI
+  - bioinformatics
+references:
+  - type: article
+    title: "ANARCI: antigen receptor numbering and receptor classification"
+    authors:
+      - given-names: James
+        family-names: Dunbar
+      - given-names: Charlotte M.
+        family-names: Deane
+    journal: Bioinformatics
+    volume: 32
+    issue: 2
+    start: 298
+    end: 300
+    year: 2016
+    doi: 10.1093/bioinformatics/btv552
+  - type: article
+    title: Accelerated profile HMM searches
+    authors:
+      - given-names: Sean R.
+        family-names: Eddy
+    journal: PLoS Computational Biology
+    volume: 7
+    issue: 10
+    start: e1002195
+    year: 2011
+    doi: 10.1371/journal.pcbi.1002195
+  - type: article
+    title: >-
+      IMGT unique numbering for immunoglobulin and T cell receptor variable domains and Ig superfamily V-like domains
+    authors:
+      - given-names: Marie-Paule
+        family-names: Lefranc
+      - given-names: Christelle
+        family-names: Pommié
+      - given-names: Manuel
+        family-names: Ruiz
+      - given-names: Véronique
+        family-names: Giudicelli
+      - given-names: Elodie
+        family-names: Foulquier
+      - given-names: Lisa
+        family-names: Truong
+      - given-names: Valérie
+        family-names: Thouvenin-Contet
+      - given-names: Gérard
+        family-names: Lefranc
+    journal: Developmental & Comparative Immunology
+    volume: 27
+    issue: 1
+    start: 55
+    end: 77
+    year: 2003
+    doi: 10.1016/S0145-305X(02)00039-3
+  - type: article
+    title: >-
+      IMGT/GENE-DB: a comprehensive database for human and mouse immunoglobulin and T cell receptor genes
+    authors:
+      - given-names: Véronique
+        family-names: Giudicelli
+      - given-names: Denys
+        family-names: Chaume
+      - given-names: Marie-Paule
+        family-names: Lefranc
+    journal: Nucleic Acids Research
+    volume: 33
+    issue: Database issue
+    start: D256
+    end: D261
+    year: 2005
+    doi: 10.1093/nar/gki010
