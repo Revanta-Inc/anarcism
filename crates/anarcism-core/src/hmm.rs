@@ -2648,7 +2648,7 @@ mod tests {
             ("myoglobin_tandem_x8", 0),
         ];
         let corpus: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json")).unwrap();
+            serde_json::from_str(include_str!("../../../tests/golden/corpus.json")).unwrap();
         let cases = corpus.as_array().unwrap();
         let database = embedded_profiles().unwrap();
 

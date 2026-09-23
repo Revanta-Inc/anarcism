@@ -2,13 +2,14 @@ import { readFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 
-import init, { numberSequence, validateAntibodyPair } from "../browser/dist/index.js";
+import { Anarcism } from "../packages/anarcism/dist/index.js";
 
-const originalCorpusUrl = new URL("../tests/golden/corpus.json", import.meta.url);
-const expandedCorpusUrl = new URL("../tests/golden/corpus_v2.json", import.meta.url);
-const expandedReferenceUrl = new URL("../tests/golden/corpus_v2_reference.json", import.meta.url);
-const wasmUrl = new URL("../browser/dist/anarcism.wasm", import.meta.url);
-const textEncoder = new TextEncoder();
+const corpusUrl = new URL("../tests/golden/corpus.json", import.meta.url);
+const referenceUrl = new URL("../tests/golden/corpus_reference.jsonl", import.meta.url);
+const wasmUrl = new URL("../packages/anarcism/dist/anarcism.wasm", import.meta.url);
+const maximumAllowedAbsoluteScoreDifference = 0.2;
+const maximumAllowedRelativeEValueDifference = 0.08;
+const maximumAllowedAbsoluteBiasDifference = 0.2;
 
 function emptyResult() {
 	return {
@@ -16,7 +17,16 @@ function emptyResult() {
 		residues: 0,
 		exactDomains: 0,
 		exactResidues: 0,
+		scoresWithinDisplayedPrecision: 0,
+		scoreCount: 0,
+		absoluteScoreDifferenceSum: 0,
 		maximumScoreDifference: 0,
+		maximumBiasDifference: 0,
+		eValuesWithinDisplayedPrecision: 0,
+		eValueCount: 0,
+		relativeEValueDifferenceSum: 0,
+		maximumRelativeEValueDifference: 0,
+		maximumRelativeEValueDifferenceCase: null,
 		failures: [],
 	};
 }
@@ -26,142 +36,154 @@ function mergeResult(target, source) {
 	target.residues += source.residues;
 	target.exactDomains += source.exactDomains;
 	target.exactResidues += source.exactResidues;
+	target.scoresWithinDisplayedPrecision += source.scoresWithinDisplayedPrecision;
+	target.scoreCount += source.scoreCount;
+	target.absoluteScoreDifferenceSum += source.absoluteScoreDifferenceSum;
 	target.maximumScoreDifference = Math.max(
 		target.maximumScoreDifference,
 		source.maximumScoreDifference,
 	);
+	target.maximumBiasDifference = Math.max(
+		target.maximumBiasDifference,
+		source.maximumBiasDifference,
+	);
+	target.eValuesWithinDisplayedPrecision += source.eValuesWithinDisplayedPrecision;
+	target.eValueCount += source.eValueCount;
+	target.relativeEValueDifferenceSum += source.relativeEValueDifferenceSum;
+	if (source.maximumRelativeEValueDifference > target.maximumRelativeEValueDifference) {
+		target.maximumRelativeEValueDifference = source.maximumRelativeEValueDifference;
+		target.maximumRelativeEValueDifferenceCase = source.maximumRelativeEValueDifferenceCase;
+	}
 	target.failures.push(...source.failures);
 }
 
-function fnv1a64(value) {
-	let hash = 0xcbf29ce484222325n;
-	for (const byte of textEncoder.encode(value)) {
-		hash ^= BigInt(byte);
-		hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+function recordEValueParity(result, id, actual, expected, significantDigits) {
+	result.eValueCount += 1;
+	if (!Number.isFinite(actual) || actual <= 0 || !Number.isFinite(expected) || expected <= 0) {
+		result.failures.push(`${id}: invalid E-value`);
+		return;
 	}
-	return hash.toString(16).padStart(16, "0");
+	if (!Number.isSafeInteger(significantDigits) || significantDigits < 1) {
+		result.failures.push(`${id}: invalid E-value display precision`);
+		return;
+	}
+
+	const relativeDifference = Math.abs(actual - expected) / expected;
+	result.relativeEValueDifferenceSum += relativeDifference;
+	if (relativeDifference > result.maximumRelativeEValueDifference) {
+		result.maximumRelativeEValueDifference = relativeDifference;
+		result.maximumRelativeEValueDifferenceCase = id;
+	}
+
+	const exponent = Math.floor(Math.log10(expected));
+	const displayQuantum = 10 ** (exponent - significantDigits + 1);
+	const displayTolerance = displayQuantum / 2 + expected * 1e-12;
+	if (Math.abs(actual - expected) <= displayTolerance) {
+		result.eValuesWithinDisplayedPrecision += 1;
+	}
 }
 
-function numberingFingerprint(numbering) {
-	return fnv1a64(
-		numbering
-			.map((residue) =>
-				[residue.sequenceIndex, residue.aminoAcid, residue.position, residue.insertionCode].join(
-					"|",
-				),
-			)
-			.join("\n") + (numbering.length > 0 ? "\n" : ""),
-	);
+// Mirrors tools/generate_golden.py: IMGT labels in residue order, with runs of
+// consecutive plain positions written as `a-b`. Returns null when residues are
+// not the contiguous sequence span the reference encoding assumes.
+function encodeNumbering(sequence, domain) {
+	const tokens = [];
+	let run = null;
+	const flush = () => {
+		if (run) tokens.push(run[0] === run[1] ? `${run[0]}` : `${run[0]}-${run[1]}`);
+		run = null;
+	};
+	for (const [offset, residue] of domain.numbering.entries()) {
+		if (
+			residue.sequenceIndex !== domain.start + offset ||
+			residue.aminoAcid !== sequence[residue.sequenceIndex]
+		) {
+			return null;
+		}
+		if (!residue.insertionCode && run && residue.position === run[1] + 1) {
+			run[1] = residue.position;
+			continue;
+		}
+		flush();
+		if (residue.insertionCode) tokens.push(`${residue.position}${residue.insertionCode}`);
+		else run = [residue.position, residue.position];
+	}
+	flush();
+	return tokens.join(" ");
 }
 
 async function readJson(url) {
 	return JSON.parse(await readFile(url, "utf8"));
 }
 
-async function initializeWasm() {
-	await init(await readFile(wasmUrl));
+// corpus_reference.jsonl: a header record, then one record per case, sorted by id.
+async function readReference(url) {
+	const [header, ...cases] = (await readFile(url, "utf8"))
+		.trimEnd()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	return { ...header, cases: new Map(cases.map((entry) => [entry.id, entry])) };
 }
 
-async function checkOriginalCorpus(corpus) {
-	const result = emptyResult();
-	await initializeWasm();
+async function initializeWasm() {
+	return Anarcism.create({ source: await readFile(wasmUrl) });
+}
 
-	for (const testCase of corpus.cases) {
-		const observed = numberSequence(testCase.sequence);
-		if (observed.domains.length !== testCase.referenceDomains.length) {
+async function checkShard(shardIndex, shardCount) {
+	const corpusPromise = readJson(corpusUrl);
+	const referencePromise = readReference(referenceUrl);
+	const anarcism = await initializeWasm();
+	const [corpus, reference] = await Promise.all([corpusPromise, referencePromise]);
+	const result = emptyResult();
+
+	for (let caseIndex = shardIndex; caseIndex < corpus.length; caseIndex += shardCount) {
+		const testCase = corpus[caseIndex];
+		const referenceCase = reference.cases.get(testCase.id);
+		if (!referenceCase || testCase.category !== referenceCase.category) {
+			result.failures.push(`${testCase.id}: reference identity`);
+			continue;
+		}
+		const observed = anarcism.numberSequence(testCase.seq);
+		if (observed.domains.length !== referenceCase.domains.length) {
 			result.failures.push(`${testCase.id}: domain count`);
 			continue;
 		}
 		for (let index = 0; index < observed.domains.length; index += 1) {
 			result.domains += 1;
 			const actual = observed.domains[index];
-			const expected = testCase.referenceDomains[index];
+			const expected = referenceCase.domains[index];
+			const numberingExact = encodeNumbering(testCase.seq, actual) === expected.numbering;
 			const domainExact =
-				actual.chainType === expected.chainType &&
-				actual.species === expected.species &&
+				`${actual.species}_${actual.chainType}` === expected.profile &&
 				actual.start === expected.start &&
 				actual.end === expected.end &&
-				actual.paddedImgtAlignment === expected.paddedImgtAlignment;
+				actual.paddedImgtAlignment === expected.alignment;
 			if (domainExact) result.exactDomains += 1;
 			else result.failures.push(`${testCase.id}: domain ${index}`);
 			result.maximumScoreDifference = Math.max(
 				result.maximumScoreDifference,
 				Math.abs(actual.bitScore - expected.bitScore),
 			);
-			result.residues += expected.numbering.length;
-			for (let residueIndex = 0; residueIndex < expected.numbering.length; residueIndex += 1) {
-				const left = actual.numbering[residueIndex];
-				const right = expected.numbering[residueIndex];
-				if (
-					left &&
-					left.sequenceIndex === right.sequenceIndex &&
-					left.aminoAcid === right.aminoAcid &&
-					left.position === right.position &&
-					left.insertionCode === right.insertionCode
-				) {
-					result.exactResidues += 1;
-				} else {
-					result.failures.push(`${testCase.id}: residue ${residueIndex}`);
-				}
+			const scoreDifference = Math.abs(actual.bitScore - expected.bitScore);
+			result.scoreCount += 1;
+			result.absoluteScoreDifferenceSum += scoreDifference;
+			if (scoreDifference <= reference.format.scoreDisplayPrecisionBits / 2 + 1e-6) {
+				result.scoresWithinDisplayedPrecision += 1;
 			}
-		}
-	}
-
-	for (const pair of corpus.pairs) {
-		const observed = validateAntibodyPair(pair.vh, pair.vl);
-		if (observed.ok !== pair.ok) result.failures.push(`${pair.id}: pair outcome`);
-	}
-	return result;
-}
-
-async function checkExpandedShard(shardIndex, shardCount) {
-	const expandedCorpusPromise = readJson(expandedCorpusUrl);
-	const expandedReferencePromise = readJson(expandedReferenceUrl);
-	await initializeWasm();
-	const [expandedCorpus, expandedReference] = await Promise.all([
-		expandedCorpusPromise,
-		expandedReferencePromise,
-	]);
-	const result = emptyResult();
-
-	for (let caseIndex = shardIndex; caseIndex < expandedCorpus.length; caseIndex += shardCount) {
-		const testCase = expandedCorpus[caseIndex];
-		const referenceCase = expandedReference.cases[caseIndex];
-		if (
-			!referenceCase ||
-			testCase.id !== referenceCase.id ||
-			testCase.category !== referenceCase.category
-		) {
-			result.failures.push(`${testCase.id}: expanded reference identity`);
-			continue;
-		}
-		const observed = numberSequence(testCase.seq);
-		if (observed.domains.length !== referenceCase.domains.length) {
-			result.failures.push(`${testCase.id}: expanded domain count`);
-			continue;
-		}
-		for (let index = 0; index < observed.domains.length; index += 1) {
-			result.domains += 1;
-			const actual = observed.domains[index];
-			const expected = referenceCase.domains[index];
-			const numberingExact =
-				actual.numbering.length === expected.numberingLength &&
-				numberingFingerprint(actual.numbering) === expected.numberingFnv1a64;
-			const domainExact =
-				actual.chainType === expected.chainType &&
-				actual.species === expected.species &&
-				actual.start === expected.start &&
-				actual.end === expected.end &&
-				fnv1a64(actual.paddedImgtAlignment) === expected.paddedAlignmentFnv1a64;
-			if (domainExact) result.exactDomains += 1;
-			else result.failures.push(`${testCase.id}: expanded domain ${index}`);
-			result.maximumScoreDifference = Math.max(
-				result.maximumScoreDifference,
-				Math.abs(actual.bitScore - expected.bitScore),
+			result.maximumBiasDifference = Math.max(
+				result.maximumBiasDifference,
+				Math.abs(actual.bias - expected.bias),
 			);
-			result.residues += expected.numberingLength;
-			if (numberingExact) result.exactResidues += expected.numberingLength;
-			else result.failures.push(`${testCase.id}: expanded numbering ${index}`);
+			recordEValueParity(
+				result,
+				`${testCase.id}: domain ${index}`,
+				actual.eValue,
+				expected.eValue,
+				reference.format.eValueDisplaySignificantDigits,
+			);
+			result.residues += actual.numbering.length;
+			if (numberingExact) result.exactResidues += actual.numbering.length;
+			else result.failures.push(`${testCase.id}: numbering ${index}`);
 		}
 	}
 	return result;
@@ -198,50 +220,54 @@ function runWorker(shardIndex, shardCount) {
 }
 
 if (!isMainThread) {
-	const result = await checkExpandedShard(workerData.shardIndex, workerData.shardCount);
+	const result = await checkShard(workerData.shardIndex, workerData.shardCount);
 	parentPort.postMessage(result);
 } else {
-	const [corpus, expandedCorpus, expandedReference] = await Promise.all([
-		readJson(originalCorpusUrl),
-		readJson(expandedCorpusUrl),
-		readJson(expandedReferenceUrl),
-	]);
+	const [corpus, reference] = await Promise.all([readJson(corpusUrl), readReference(referenceUrl)]);
 	const result = emptyResult();
-	if (expandedCorpus.length !== expandedReference.cases.length) {
-		result.failures.push("expanded corpus/reference case count");
+	if (corpus.length !== reference.cases.size) {
+		result.failures.push("corpus/reference case count");
 	}
 
-	const workerCount = configuredWorkerCount(expandedCorpus.length);
-	const expandedPromise =
-		expandedCorpus.length === expandedReference.cases.length
+	const workerCount = configuredWorkerCount(corpus.length);
+	const shardResults =
+		corpus.length === reference.cases.size
 			? Promise.all(
 					Array.from({ length: workerCount }, (_, shardIndex) =>
 						runWorker(shardIndex, workerCount),
 					),
 				)
-			: Promise.resolve([]);
-	const [originalResult, expandedResults] = await Promise.all([
-		checkOriginalCorpus(corpus),
-		expandedPromise,
-	]);
-	mergeResult(result, originalResult);
-	for (const shardResult of expandedResults) mergeResult(result, shardResult);
+			: [];
+	for (const shardResult of await shardResults) mergeResult(result, shardResult);
 	result.failures.sort();
 
 	console.log(
 		JSON.stringify(
 			{
-				reference: [corpus.reference, expandedReference.reference],
+				reference: reference.reference,
 				workers: workerCount,
-				cases: {
-					original: corpus.cases.length,
-					expanded: expandedCorpus.length,
-					total: corpus.cases.length + expandedCorpus.length,
-				},
+				cases: corpus.length,
 				domains: { exact: result.exactDomains, total: result.domains },
 				residues: { exact: result.exactResidues, total: result.residues },
+				scores: {
+					withinDisplayedPrecision: result.scoresWithinDisplayedPrecision,
+					total: result.scoreCount,
+					meanAbsoluteDifference:
+						result.scoreCount === 0 ? 0 : result.absoluteScoreDifferenceSum / result.scoreCount,
+				},
+				eValues: {
+					withinDisplayedPrecision: result.eValuesWithinDisplayedPrecision,
+					total: result.eValueCount,
+					meanRelativeDifference:
+						result.eValueCount === 0 ? 0 : result.relativeEValueDifferenceSum / result.eValueCount,
+					maximumRelativeDifference: result.maximumRelativeEValueDifference,
+					maximumRelativeDifferenceCase: result.maximumRelativeEValueDifferenceCase,
+					maximumAllowedRelativeDifference: maximumAllowedRelativeEValueDifference,
+				},
 				maximumAbsoluteBitScoreDifference: result.maximumScoreDifference,
-				pairCases: corpus.pairs.length,
+				maximumAllowedAbsoluteBitScoreDifference: maximumAllowedAbsoluteScoreDifference,
+				maximumAbsoluteBiasDifference: result.maximumBiasDifference,
+				maximumAllowedAbsoluteBiasDifference,
 				failures: result.failures,
 			},
 			null,
@@ -249,5 +275,12 @@ if (!isMainThread) {
 		),
 	);
 
-	if (result.failures.length > 0 || result.maximumScoreDifference > 4) process.exitCode = 1;
+	if (
+		result.failures.length > 0 ||
+		result.maximumScoreDifference > maximumAllowedAbsoluteScoreDifference ||
+		result.maximumBiasDifference > maximumAllowedAbsoluteBiasDifference ||
+		result.maximumRelativeEValueDifference > maximumAllowedRelativeEValueDifference
+	) {
+		process.exitCode = 1;
+	}
 }

@@ -1494,7 +1494,7 @@ mod tests {
     #[test]
     fn sequence_major_batch_preserves_marginal_and_multidomain_results() {
         let corpus: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json")).unwrap();
+            serde_json::from_str(include_str!("../../../tests/golden/corpus.json")).unwrap();
         let cases = corpus.as_array().unwrap();
         let selected: Vec<_> = ["cdr1len_vl_00", "scfv_okt3_vl_vh_mouse"]
             .into_iter()

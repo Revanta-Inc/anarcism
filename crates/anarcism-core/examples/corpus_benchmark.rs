@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
@@ -32,31 +33,37 @@ struct CorpusCase {
 }
 
 #[derive(Deserialize)]
-struct Reference {
-    cases: Vec<ReferenceCase>,
-}
-
-#[derive(Deserialize)]
 struct ReferenceCase {
     id: String,
     domains: Vec<Value>,
 }
 
 fn main() {
-    let warmups = setting("ANARCISM_BENCH_WARMUP", 2);
-    let iterations = setting("ANARCISM_BENCH_WORKLOAD_ITERATIONS", 9);
-    let corpus_iterations = setting("ANARCISM_BENCH_CORPUS_ITERATIONS", 3);
-    let scaling_repetitions = setting("ANARCISM_BENCH_SCALING_REPETITIONS", 24);
+    let warmups = setting("ANARCISM_BENCH_WARMUP", 3);
+    let iterations = setting("ANARCISM_BENCH_WORKLOAD_ITERATIONS", 21);
+    let corpus_iterations = setting("ANARCISM_BENCH_CORPUS_ITERATIONS", 7);
+    let dense_iterations = setting("ANARCISM_BENCH_DENSE_ITERATIONS", 11);
+    let dense_pairs = setting("ANARCISM_BENCH_DENSE_PAIRS", 500);
     let corpus: Vec<CorpusCase> =
-        serde_json::from_str(include_str!("../../../tests/golden/corpus_v2.json"))
+        serde_json::from_str(include_str!("../../../tests/golden/corpus.json"))
             .expect("corpus is valid");
-    let reference: Reference = serde_json::from_str(include_str!(
-        "../../../tests/golden/corpus_v2_reference.json"
-    ))
-    .expect("reference is valid");
-    assert_eq!(corpus.len(), reference.cases.len());
-    for (case, expected) in corpus.iter().zip(&reference.cases) {
-        assert_eq!(case.id, expected.id);
+    let reference_cases: HashMap<String, ReferenceCase> =
+        include_str!("../../../tests/golden/corpus_reference.jsonl")
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let case: ReferenceCase =
+                    serde_json::from_str(line).expect("reference record is valid");
+                (case.id.clone(), case)
+            })
+            .collect();
+    assert_eq!(corpus.len(), reference_cases.len());
+    for case in &corpus {
+        assert!(
+            reference_cases.contains_key(&case.id),
+            "{} has no reference",
+            case.id
+        );
     }
 
     let options = NumberingOptions::default();
@@ -67,7 +74,7 @@ fn main() {
                 .iter()
                 .position(|case| case.id == *id)
                 .unwrap_or_else(|| panic!("missing workload {id}"));
-            (&corpus[index], reference.cases[index].domains.len())
+            (&corpus[index], reference_cases[*id].domains.len())
         })
         .collect();
 
@@ -87,6 +94,7 @@ fn main() {
                 "domains": expected_domains,
                 "medianMs": percentile(&samples, 0.5),
                 "p95Ms": percentile(&samples, 0.95),
+                "samplesMs": samples,
             })
         })
         .collect();
@@ -98,56 +106,55 @@ fn main() {
             sequence: case.seq.clone(),
         })
         .collect();
-    let expected_domains: usize = reference.cases.iter().map(|case| case.domains.len()).sum();
-    let corpus_samples = measure(corpus_iterations, || {
-        let results = number_sequences(&inputs, &options).expect("corpus numbering succeeds");
-        let observed_domains = results
-            .iter()
-            .map(|result| result.domains.len())
-            .sum::<usize>();
-        black_box(results);
-        assert_eq!(observed_domains, expected_domains);
-    });
-
-    let scaling_inputs: Vec<_> = (0..scaling_repetitions)
-        .flat_map(|repetition| {
-            workloads.iter().map(move |(case, _)| SequenceInput {
-                id: format!("{}-{repetition}", case.id),
-                sequence: case.seq.clone(),
-            })
+    let expected_domains: usize = reference_cases
+        .values()
+        .map(|case| case.domains.len())
+        .sum();
+    let heavy = workloads[0].0;
+    let light = workloads[1].0;
+    let dense_inputs: Vec<_> = (0..dense_pairs)
+        .flat_map(|pair_index| {
+            [
+                SequenceInput {
+                    id: format!("dense-vh-{pair_index}"),
+                    sequence: heavy.seq.clone(),
+                },
+                SequenceInput {
+                    id: format!("dense-vl-{pair_index}"),
+                    sequence: light.seq.clone(),
+                },
+            ]
         })
         .collect();
     let logical_cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    let corpus_parallel_workers = NonZeroUsize::new(logical_cpus).expect("worker count is nonzero");
-    let parallel_corpus_samples = measure(corpus_iterations, || {
-        let results = number_sequences_parallel(&inputs, &options, corpus_parallel_workers)
-            .expect("parallel corpus numbering succeeds");
-        let observed_domains = results
-            .iter()
-            .map(|result| result.domains.len())
-            .sum::<usize>();
-        black_box(results);
-        assert_eq!(observed_domains, expected_domains);
-    });
-    let scaling: Vec<_> = [1, 2, 4, 8]
+    let worker_counts: Vec<_> = [1, 2, 4, 8]
         .into_iter()
         .filter(|workers| *workers <= logical_cpus)
-        .map(|workers| {
-            let samples = measure(3, || {
-                let results = number_sequences_parallel(
-                    &scaling_inputs,
-                    &options,
-                    NonZeroUsize::new(workers).expect("worker count is nonzero"),
-                )
-                .expect("parallel numbering succeeds");
-                black_box(results);
+        .collect();
+    let corpus_scaling: Vec<_> = worker_counts
+        .iter()
+        .map(|&workers| {
+            let samples = measure(corpus_iterations, || {
+                validate_batch(&inputs, &options, workers, expected_domains, "corpus")
             });
-            let total_ms = percentile(&samples, 0.5);
-            throughput(workers, total_ms, scaling_inputs.len())
+            throughput(workers, samples, inputs.len())
         })
         .collect();
-    let corpus_ms = percentile(&corpus_samples, 0.5);
-    let parallel_corpus_ms = percentile(&parallel_corpus_samples, 0.5);
+    let dense_scaling: Vec<_> = worker_counts
+        .iter()
+        .map(|&workers| {
+            let samples = measure(dense_iterations, || {
+                validate_batch(
+                    &dense_inputs,
+                    &options,
+                    workers,
+                    dense_inputs.len(),
+                    "dense batch",
+                )
+            });
+            throughput(workers, samples, dense_inputs.len())
+        })
+        .collect();
 
     println!(
         "{}",
@@ -158,14 +165,19 @@ fn main() {
                 "warmupIterations": warmups,
                 "workloadIterations": iterations,
                 "corpusIterations": corpus_iterations,
+                "denseIterations": dense_iterations,
+                "densePairs": dense_pairs,
+                "denseSequences": dense_inputs.len(),
                 "corpusCases": inputs.len(),
                 "corpusDomains": expected_domains,
-                "scalingSequences": scaling_inputs.len(),
             },
             "workloads": workload_results,
-            "corpus": throughput(1, corpus_ms, inputs.len()),
-            "parallelCorpus": throughput(logical_cpus, parallel_corpus_ms, inputs.len()),
-            "scaling": scaling,
+            "corpus": corpus_scaling.first(),
+            "parallelCorpus": corpus_scaling.last(),
+            "corpusScaling": corpus_scaling,
+            "dense": dense_scaling.first(),
+            "parallelDense": dense_scaling.last(),
+            "denseScaling": dense_scaling,
         }))
         .expect("benchmark result serializes")
     );
@@ -175,6 +187,31 @@ fn validate(case: &CorpusCase, expected_domains: usize, options: &NumberingOptio
     let result = number_sequence(&case.seq, options).expect("numbering succeeds");
     assert_eq!(result.domains.len(), expected_domains, "{}", case.id);
     black_box(result);
+}
+
+fn validate_batch(
+    inputs: &[SequenceInput],
+    options: &NumberingOptions,
+    workers: usize,
+    expected_domains: usize,
+    label: &str,
+) {
+    let results = if workers == 1 {
+        number_sequences(inputs, options)
+    } else {
+        number_sequences_parallel(
+            inputs,
+            options,
+            NonZeroUsize::new(workers).expect("worker count is nonzero"),
+        )
+    }
+    .unwrap_or_else(|error| panic!("{label} numbering succeeds: {error}"));
+    let observed_domains = results
+        .iter()
+        .map(|result| result.domains.len())
+        .sum::<usize>();
+    assert_eq!(observed_domains, expected_domains, "{label}");
+    black_box(results);
 }
 
 fn measure(mut iterations: usize, mut operation: impl FnMut()) -> Vec<f64> {
@@ -193,10 +230,13 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
     samples[((samples.len() as f64 * fraction).floor() as usize).min(samples.len() - 1)]
 }
 
-fn throughput(workers: usize, total_ms: f64, sequences: usize) -> Value {
+fn throughput(workers: usize, samples: Vec<f64>, sequences: usize) -> Value {
+    let total_ms = percentile(&samples, 0.5);
     json!({
         "workers": workers,
         "totalMs": total_ms,
+        "p95TotalMs": percentile(&samples, 0.95),
+        "samplesMs": samples,
         "sequences": sequences,
         "perSequenceMs": total_ms / sequences as f64,
         "sequencesPerSecond": sequences as f64 * 1_000.0 / total_ms,

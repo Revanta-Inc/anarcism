@@ -1,245 +1,298 @@
 #!/usr/bin/env python3
-"""Generate the checked-in compatibility corpus with pinned ANARCI/HMMER.
+"""Generate the checked-in ANARCI reference for the golden corpus.
 
-Only this development tool invokes native ANARCI. Browser and Rust tests read
+Only this development tool invokes native ANARCI. JavaScript and Rust tests read
 the resulting JSON and never need Python or HMMER.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import math
 import subprocess
-from importlib.metadata import version
+import tomllib
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from anarci import anarci
-from anarci.germlines import all_germlines
+ROOT = Path(__file__).resolve().parents[1]
+GOLDEN = ROOT / "tests" / "golden"
+MANIFEST = tomllib.loads((ROOT / "assets/MANIFEST.toml").read_text())
+ANARCI_REPOSITORY = MANIFEST["reference"]["anarci_repository"]
+ANARCI_COMMIT = MANIFEST["reference"]["anarci_commit"]
+IMGT_GENEDB_PROGRAM_VERSION = MANIFEST["reference"][
+    "imgt_genedb_program_version"
+]
+IMGT_SNAPSHOT = MANIFEST["reference"]["imgt_snapshot"]
+EXPECTED_HMM_SHA256 = MANIFEST["profiles"]["source_sha256"]
+EXPECTED_GERMLINES_SHA256 = MANIFEST["germlines"]["source_sha256"]
+def anarci_with_score_components(
+    sequences: list[tuple[str, str]],
+) -> tuple[list[Any], list[Any], list[Any]]:
+    """Run versioned ANARCI while retaining HMMER envelope coordinates.
+
+    ANARCI's public details preserve the domain score and null2 bias,
+    but discard the HSP envelope bounds needed to reconstruct the isolated
+    Forward score. Its parser is wrapped only for this development tool.
+    """
+    anarci_module = importlib.import_module("anarci.anarci")
+    original_parser = anarci_module._parse_hmmer_query
+
+    def parse_with_envelopes(query: Any, *args: Any, **kwargs: Any) -> Any:
+        result = original_parser(query, *args, **kwargs)
+        details = result[2]
+        used_hsps: set[int] = set()
+        for detail in details:
+            candidates = [
+                (index, hsp)
+                for index, hsp in enumerate(query.hsps)
+                if index not in used_hsps
+                and hsp.hit_id == detail["id"]
+                and math.isclose(hsp.bitscore, detail["bitscore"], abs_tol=1.0e-6)
+            ]
+            if not candidates:
+                raise RuntimeError(
+                    f'could not recover HMMER envelope for {query.id}/{detail["id"]}'
+                )
+            index, hsp = min(
+                candidates,
+                key=lambda candidate: abs(
+                    candidate[1].query_start - detail["query_start"]
+                )
+                + abs(candidate[1].query_end - detail["query_end"]),
+            )
+            used_hsps.add(index)
+            detail["envelope_start"] = hsp.env_start
+            detail["envelope_end"] = hsp.env_end
+        return result
+
+    anarci_module._parse_hmmer_query = parse_with_envelopes
+    try:
+        return anarci_module.anarci(
+            sequences,
+            scheme="imgt",
+            allowed_species=None,
+            assign_germline=True,
+        )
+    finally:
+        anarci_module._parse_hmmer_query = original_parser
 
 
-PINNED_ANARCI = "2026.2.13.2"
-ANARCI_COMMIT = "edcc29a08c40ac5acd49ce09f60a5ebfb7ccdd0c"
-VH = "EVQLQQSGAEVVRSGASVKLSCTASGFNIKDYYIHWVKQRPEKGLEWIGWIDPEIGDTEYVPKFQGKATMTADTSSNTAYLQLSSLTSEDTAVYYCNAGHDYDRGRFPYWGQGTLVTVSAA"
-VL = "DIVMTQSQKFMSTSVGDRVSITCKASQNVGTAVAWYQQKPGQSPKLMIYSASNRYTGVPDRFTGSGSGTDFTLTISNMQSEDLADYFCQQYSSYPLTFGAGTKLELKR"
-SCFV = "DIQMTQSPSSLSASVGDRVTITCRTSGNIHNYLTWYQQKPGKAPQLLIYNAKTLADGVPSRFSGSGSGTQFTLTISSLQPEDFANYYCQHFWSLPFTFGQGTKVEIKRTGGGGSGGGGSGGGGSGGGGSEVQLVESGGGLVQPGGSLRLSCAASGFDFSRYDMSWVRQAPGKRLEWVAYISSGGGSTYFPDTVKGRFTISRDNAKNTLYLQMNSLRAEDTAVYYCARQNKKLTWFDYWGQGTLVTVSSHHHHHH"
-LYSOZYME = "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL"
-FNV_OFFSET = 0xCBF29CE484222325
-FNV_PRIME = 0x100000001B3
-
-
-def synthetic_domain(chain: str, species: str) -> str:
-    v = next(iter(all_germlines["V"][chain][species].values()))
-    j = next(iter(all_germlines["J"][chain][species].values()))
-    aligned: list[str] = []
-    for position, (v_residue, j_residue) in enumerate(zip(v, j), start=1):
-        if v_residue != "-":
-            aligned.append(v_residue)
-        elif j_residue != "-":
-            aligned.append(j_residue)
-        elif 105 <= position <= 117:
-            aligned.append("A")
-        else:
-            aligned.append("-")
-    return "".join(aligned).replace("-", "")
-
-
-def cases() -> list[dict[str, str]]:
-    return [
-        {"id": "mouse_vh", "category": "non-human VH", "sequence": VH},
-        {"id": "mouse_kappa", "category": "kappa VL", "sequence": VL},
-        {
-            "id": "human_lambda",
-            "category": "lambda VL",
-            "sequence": synthetic_domain("L", "human"),
-        },
-        {
-            "id": "cow_vh",
-            "category": "non-human VH",
-            "sequence": synthetic_domain("H", "cow"),
-        },
-        *[
-            {
-                "id": f"human_tcr_{chain.lower()}",
-                "category": f"TCR {chain}",
-                "sequence": synthetic_domain(chain, "human"),
-            }
-            for chain in "ABGD"
-        ],
-        {
-            "id": "n_terminal_truncation",
-            "category": "truncated domain",
-            "sequence": VH[5:],
-        },
-        {
-            "id": "c_terminal_truncation",
-            "category": "truncated domain",
-            "sequence": VH[:100],
-        },
-        {
-            "id": "flanked_boundary",
-            "category": "start/end boundary",
-            "sequence": f"MPEPTIDE{VH}GG",
-        },
-        {
-            "id": "cdr3_insertion",
-            "category": "insertion",
-            "sequence": VH.replace("CNAGHD", "CNAGAAAAHD"),
-        },
-        {
-            "id": "cdr1_deletion",
-            "category": "deletion",
-            "sequence": VH[:29] + VH[33:],
-        },
-        {"id": "vl_vh_scfv", "category": "multiple domains", "sequence": SCFV},
-        {"id": "lysozyme", "category": "non-antibody protein", "sequence": LYSOZYME},
+def verify_reference_inputs() -> None:
+    anarci_module = importlib.import_module("anarci.anarci")
+    germline_module = importlib.import_module("anarci.germlines")
+    sources = [
+        (
+            Path(anarci_module.HMM_path) / "ALL.hmm",
+            EXPECTED_HMM_SHA256,
+            "ALL.hmm",
+        ),
+        (
+            Path(germline_module.__file__ or ""),
+            EXPECTED_GERMLINES_SHA256,
+            "germlines.py",
+        ),
     ]
+    for source_path, expected_hash, label in sources:
+        observed_hash = sha256(source_path.read_bytes()).hexdigest()
+        if observed_hash != expected_hash:
+            raise SystemExit(
+                f"expected {IMGT_SNAPSHOT} {label} SHA-256 {expected_hash}, "
+                f"found {observed_hash} at {source_path}"
+            )
+
+
+FORMAT = {
+    "numbering": (
+        "space-separated IMGT labels for residues start..end in sequence order; "
+        "a-b is the run of plain positions a through b"
+    ),
+    "alternativeHits": ["profile", "bitScore", "eValue", "bias", "queryStart", "queryEnd"],
+    "germline": ["species", "vGene", "vIdentity", "jGene", "jIdentity"],
+    "eValueDisplaySignificantDigits": 2,
+    "scoreDisplayPrecisionBits": 0.1,
+}
+
+
+def encode_numbering(labels: list[tuple[int, str]]) -> str:
+    tokens = []
+    index = 0
+    while index < len(labels):
+        position, insertion = labels[index]
+        if insertion:
+            tokens.append(f"{position}{insertion}")
+            index += 1
+            continue
+        end = index
+        while (
+            end + 1 < len(labels)
+            and not labels[end + 1][1]
+            and labels[end + 1][0] == labels[end][0] + 1
+        ):
+            end += 1
+        last = labels[end][0]
+        tokens.append(str(position) if end == index else f"{position}-{last}")
+        index = end + 1
+    return " ".join(tokens)
 
 
 def reference_domains(
     sequence: str,
     numbered: list[Any] | None,
     details: list[dict[str, Any]] | None,
+    hit_table: list[list[Any]] | None,
 ) -> list[dict[str, Any]]:
     if not numbered or not details:
         return []
     domains = []
-    for domain_index, ((alignment, numbered_start, numbered_end), detail) in enumerate(
-        zip(numbered, details)
-    ):
+    for (alignment, numbered_start, numbered_end), detail in zip(numbered, details):
+        labels = []
         sequence_index = numbered_start
-        residues = []
         for (position, insertion), amino_acid in alignment:
             if amino_acid == "-":
                 continue
-            residues.append(
-                {
-                    "sequenceIndex": sequence_index,
-                    "aminoAcid": amino_acid,
-                    "position": position,
-                    "insertionCode": insertion.strip(),
-                }
-            )
+            if sequence[sequence_index] != amino_acid:
+                raise RuntimeError(
+                    f"residue {sequence_index} is {amino_acid}, sequence has "
+                    f"{sequence[sequence_index]}"
+                )
+            labels.append((position, insertion.strip()))
             sequence_index += 1
+        # ANARCI reports an empty alignment when it cannot number the domain.
+        if labels and sequence_index != numbered_end + 1:
+            raise RuntimeError(
+                f"numbered residues end at {sequence_index}, domain ends at {numbered_end + 1}"
+            )
         domains.append(
             {
-                "domainIndex": domain_index,
                 "profile": detail["id"],
-                "chainType": detail["chain_type"],
-                "species": detail["species"],
                 "start": numbered_start,
                 "end": numbered_end + 1,
                 "bitScore": detail["bitscore"],
-                "numbering": residues,
-                "paddedImgtAlignment": "".join(amino for _, amino in alignment),
+                "eValue": detail["evalue"],
+                "bias": detail["bias"],
+                "envelope": [detail["envelope_start"], detail["envelope_end"]],
+                "alternativeHits": reference_alternative_hits(detail, hit_table),
+                "germline": reference_germline(detail),
+                "numbering": encode_numbering(labels),
+                "alignment": "".join(amino for _, amino in alignment),
             }
         )
     return domains
 
 
-def fnv1a(value: str) -> str:
-    result = FNV_OFFSET
-    for byte in value.encode("utf-8"):
-        result ^= byte
-        result = (result * FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
-    return f"{result:016x}"
-
-
-def compact_domain(domain: dict[str, Any]) -> dict[str, Any]:
-    numbering = "".join(
-        f'{residue["sequenceIndex"]}|{residue["aminoAcid"]}|'
-        f'{residue["position"]}|{residue["insertionCode"]}\n'
-        for residue in domain["numbering"]
+def reference_alternative_hits(
+    detail: dict[str, Any], hit_table: list[list[Any]] | None
+) -> list[list[Any]]:
+    """Return native ANARCI's first three overlapping non-winning hits."""
+    if not hit_table:
+        return []
+    rows = [
+        row
+        for row in hit_table[1:]
+        if row[5] < detail["query_end"] and detail["query_start"] < row[6]
+    ]
+    winner_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if row[0] == detail["id"]
+            and math.isclose(row[3], detail["bitscore"], abs_tol=1.0e-6)
+        ),
+        None,
     )
-    return {
-        "chainType": domain["chainType"],
-        "species": domain["species"],
-        "start": domain["start"],
-        "end": domain["end"],
-        "bitScore": domain["bitScore"],
-        "numberingLength": len(domain["numbering"]),
-        "numberingFnv1a64": fnv1a(numbering),
-        "paddedAlignmentFnv1a64": fnv1a(domain["paddedImgtAlignment"]),
-    }
+    if winner_index is None:
+        raise RuntimeError(f'could not find winning row for {detail["id"]}')
+    del rows[winner_index]
+    return [
+        [profile, bit_score, e_value, bias, query_start, query_end]
+        for profile, _description, e_value, bit_score, bias, query_start, query_end in rows[:3]
+    ]
+
+
+def reference_germline(detail: dict[str, Any]) -> list[Any] | None:
+    germlines = detail.get("germlines")
+    if not germlines:
+        return None
+    v_gene = germlines.get("v_gene")
+    j_gene = germlines.get("j_gene")
+    return [
+        (v_gene or j_gene)[0][0],
+        v_gene[0][1] if v_gene else None,
+        round(v_gene[1], 6) if v_gene else None,
+        j_gene[0][1] if j_gene else None,
+        round(j_gene[1], 6) if j_gene else None,
+    ]
+
+
+def write_reference(path: Path, header: dict[str, Any], cases: list[dict[str, Any]]) -> None:
+    """Write JSON Lines: a header record, then one record per case.
+
+    Cases are sorted by id, so regenerating after corpus edits or reordering
+    only changes the records whose values changed.
+    """
+    lines = [header, *sorted(cases, key=lambda case: case["id"])]
+    path.write_text(
+        "".join(
+            json.dumps(line, separators=(",", ":"), ensure_ascii=False) + "\n"
+            for line in lines
+        ),
+        encoding="utf-8",
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("output", type=Path)
     parser.add_argument(
         "--cases-file",
         type=Path,
-        help="JSON array of {id, seq, category, note} cases instead of the built-in corpus",
+        default=GOLDEN / "corpus.json",
+        help="JSON array of {id, seq, category, note} cases",
     )
     parser.add_argument(
-        "--compact",
-        action="store_true",
-        help="store hashes of alignments/numbering instead of the full reference vectors",
+        "--output",
+        type=Path,
+        default=GOLDEN / "corpus_reference.jsonl",
     )
     args = parser.parse_args()
-    if version("anarci") != PINNED_ANARCI:
-        raise SystemExit(f"this generator requires ANARCI {PINNED_ANARCI}")
+    verify_reference_inputs()
 
-    if args.cases_file:
-        raw_cases = json.loads(args.cases_file.read_text(encoding="utf-8"))
-        corpus_cases = [
-            {
-                "id": case["id"],
-                "sequence": case["seq"],
-                "category": case["category"],
-                "note": case.get("note", ""),
-            }
-            for case in raw_cases
-        ]
-    else:
-        corpus_cases = cases()
-    numbered, details, _ = anarci(
-        [(case["id"], case["sequence"]) for case in corpus_cases],
-        scheme="imgt",
-        allowed_species=None,
+    corpus = json.loads(args.cases_file.read_text(encoding="utf-8"))
+    numbered, details, hit_tables = anarci_with_score_components(
+        [(case["id"], case["seq"]) for case in corpus]
     )
-    for case, case_numbered, case_details in zip(corpus_cases, numbered, details):
-        case["referenceDomains"] = reference_domains(
-            case["sequence"], case_numbered, case_details
+    cases = [
+        {
+            "id": case["id"],
+            "category": case["category"],
+            "domains": reference_domains(
+                case["seq"], case_numbered, case_details, case_hit_table
+            ),
+        }
+        for case, case_numbered, case_details, case_hit_table in zip(
+            corpus, numbered, details, hit_tables
         )
+    ]
 
     hmmer_banner = subprocess.run(
         ["hmmscan", "-h"], check=True, capture_output=True, text=True
     ).stdout.splitlines()[1].strip()
     reference = {
-        "anarciVersion": PINNED_ANARCI,
+        "anarciRepository": ANARCI_REPOSITORY,
         "anarciCommit": ANARCI_COMMIT,
         "hmmer": hmmer_banner,
+        "imgtGenedbProgramVersion": IMGT_GENEDB_PROGRAM_VERSION,
+        "imgtSnapshot": IMGT_SNAPSHOT,
+        "hmmSourceSha256": EXPECTED_HMM_SHA256,
+        "germlineSourceSha256": EXPECTED_GERMLINES_SHA256,
         "scheme": "imgt",
-        "coordinates": "zero-based half-open numbered start/(inclusive end + 1)",
+        "coordinates": "zero-based half-open [start, end) for domains, envelopes, and hits",
     }
-    if args.compact:
-        document = {
-            "reference": reference,
-            "hash": "FNV-1a 64 over canonical UTF-8 fields",
-            "cases": [
-                {
-                    "id": case["id"],
-                    "category": case["category"],
-                    "domains": [
-                        compact_domain(domain) for domain in case["referenceDomains"]
-                    ],
-                }
-                for case in corpus_cases
-            ],
-        }
-    else:
-        document = {
-            "reference": reference,
-            "cases": corpus_cases,
-            "pairs": [
-                {"id": "valid", "vh": VH, "vl": VL, "ok": True},
-                {"id": "swapped", "vh": VL, "vl": VH, "ok": False},
-            ],
-        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {len(corpus_cases)} golden cases to {args.output}")
+    write_reference(args.output, {"reference": reference, "format": FORMAT}, cases)
+    print(f"wrote {len(cases)} reference cases to {args.output}")
 
 
 if __name__ == "__main__":
