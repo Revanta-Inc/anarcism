@@ -161,8 +161,6 @@ anarcism reproduces the methods and data of the projects below. If you use it in
 
   Giudicelli V, Chaume D, Lefranc M-P. IMGT/GENE-DB: a comprehensive database for human and mouse immunoglobulin and T cell receptor genes. _Nucleic Acids Research_ 33:D256–D261 (2005). [doi:10.1093/nar/gki010](https://doi.org/10.1093/nar/gki010)
 
-License texts and data provenance for all three are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
 ## License
 
-The project's own code is licensed under the Apache License 2.0; see [`LICENSE`](LICENSE). Third-party attributions and license texts are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The embedded profile and germline data have additional provenance and licensing considerations. Public distribution remains blocked until the IMGT-derived data question is resolved in writing.
+The project's own code is licensed under the Apache License 2.0; see [`LICENSE`](LICENSE). Third-party attributions and license texts are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
