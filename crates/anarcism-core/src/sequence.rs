@@ -1,6 +1,9 @@
 use crate::{Error, ErrorCode, Result};
 
 pub(crate) const AMINO_ALPHABET: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
+pub(crate) const CANONICAL_RESIDUE_COUNT: usize = AMINO_ALPHABET.len();
+pub(crate) const UNKNOWN_RESIDUE_INDEX: u8 = CANONICAL_RESIDUE_COUNT as u8;
+pub(crate) const RESIDUE_CODE_COUNT: usize = CANONICAL_RESIDUE_COUNT + 1;
 pub(crate) const MAX_SEQUENCE_LENGTH: usize = 10_000;
 const INVALID_RESIDUE: u8 = u8::MAX;
 const RESIDUE_INDICES: [u8; 256] = {
@@ -10,6 +13,7 @@ const RESIDUE_INDICES: [u8; 256] = {
         indices[AMINO_ALPHABET[index] as usize] = index as u8;
         index += 1;
     }
+    indices[b'X' as usize] = UNKNOWN_RESIDUE_INDEX;
     indices
 };
 
@@ -89,10 +93,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_case_and_whitespace_without_accepting_ambiguous_residues() {
-        let normalized = normalize_sequence("x", " acd\nEF ").unwrap();
-        assert_eq!(normalized.text, "ACDEF");
+    fn normalizes_case_whitespace_and_unknown_residues() {
+        let normalized = normalize_sequence("x", " acd\nxF ").unwrap();
+        assert_eq!(normalized.text, "ACDXF");
+        assert_eq!(normalized.encoded[3], UNKNOWN_RESIDUE_INDEX);
         assert_eq!(normalized.warnings.len(), 2);
-        assert!(normalize_sequence("x", "ACX").is_err());
+        assert!(normalize_sequence("x", "ACB").is_err());
     }
 }

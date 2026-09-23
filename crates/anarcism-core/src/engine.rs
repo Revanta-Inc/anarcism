@@ -1079,6 +1079,34 @@ mod tests {
     }
 
     #[test]
+    fn unknown_residue_is_supported_and_preserved() {
+        let unknown_index = 60;
+        let reference = number_sequence(VH, &NumberingOptions::default()).unwrap();
+        let reference_residue = reference.domains[0]
+            .numbering
+            .iter()
+            .find(|residue| residue.sequence_index == unknown_index)
+            .unwrap();
+
+        let mut sequence = VH.as_bytes().to_vec();
+        sequence[unknown_index] = b'X';
+        let sequence = String::from_utf8(sequence).unwrap();
+        let result = number_sequence(&sequence, &NumberingOptions::default()).unwrap();
+
+        assert_eq!(result.normalized_sequence, sequence);
+        assert_eq!(result.domains.len(), 1);
+        let residue = result.domains[0]
+            .numbering
+            .iter()
+            .find(|residue| residue.sequence_index == unknown_index)
+            .unwrap();
+        assert_eq!(residue.amino_acid, 'X');
+        assert_eq!(residue.position, reference_residue.position);
+        assert_eq!(residue.insertion_code, reference_residue.insertion_code);
+        assert!(result.domains[0].padded_imgt_alignment.contains('X'));
+    }
+
+    #[test]
     fn increasing_alternative_count_preserves_existing_hits() {
         let with_three = number_sequence(VH, &NumberingOptions::default()).unwrap();
         let with_all = number_sequence(
@@ -1171,7 +1199,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn parallel_batch_matches_serial_order_and_results() {
-        let inputs: Vec<_> = (0..8)
+        let mut inputs: Vec<_> = (0..8)
             .flat_map(|index| {
                 [
                     SequenceInput {
@@ -1185,6 +1213,7 @@ mod tests {
                 ]
             })
             .collect();
+        inputs[0].sequence.replace_range(60..61, "X");
         let options = NumberingOptions::default();
         let scalar: Vec<_> = inputs
             .iter()

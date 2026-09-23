@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use crate::Profile;
 use crate::components::connected_components;
 use crate::models::MAX_MODEL_LENGTH;
+use crate::sequence::{CANONICAL_RESIDUE_COUNT, UNKNOWN_RESIDUE_INDEX};
 
 mod batch;
 pub(crate) use batch::SequenceBatchViterbiWorkspace;
@@ -416,7 +417,7 @@ fn trace_ensemble_with_order(
                     break;
                 }
                 null2_odds_sum[sequence_index - region.start] +=
-                    odds[usize::from(sequence[sequence_index])];
+                    null2_odds_for_residue(&odds, sequence[sequence_index]);
             }
             position = sequence_end.saturating_add(1).min(region.end);
         }
@@ -452,7 +453,7 @@ fn match_bounds(domain: &RawDomain) -> Option<(usize, usize, u16, u16)> {
     ))
 }
 
-fn trace_null2_odds(profile: &Profile<'_>, domain: &RawDomain) -> [f32; 20] {
+fn trace_null2_odds(profile: &Profile<'_>, domain: &RawDomain) -> [f32; CANONICAL_RESIDUE_COUNT] {
     let mut match_usage = [0.0_f32; MAX_MODEL_LENGTH + 1];
     let mut emitted = 0.0_f32;
     for step in &domain.steps {
@@ -468,7 +469,7 @@ fn trace_null2_odds(profile: &Profile<'_>, domain: &RawDomain) -> [f32; 20] {
             TraceState::Delete => {}
         }
     }
-    let mut odds = [1.0_f32; 20];
+    let mut odds = [1.0_f32; CANONICAL_RESIDUE_COUNT];
     if emitted == 0.0 {
         return odds;
     }
@@ -485,6 +486,18 @@ fn trace_null2_odds(profile: &Profile<'_>, domain: &RawDomain) -> [f32; 20] {
         *value = weighted / emitted;
     }
     odds
+}
+
+// HMMER expands X in null2 score vectors with FAvgScVec: the unweighted
+// arithmetic mean of the canonical odds ratios.
+#[inline]
+fn null2_odds_for_residue(odds: &[f32; CANONICAL_RESIDUE_COUNT], residue: u8) -> f32 {
+    if let Some(value) = odds.get(usize::from(residue)) {
+        *value
+    } else {
+        debug_assert_eq!(residue, UNKNOWN_RESIDUE_INDEX);
+        odds.iter().sum::<f32>() / CANONICAL_RESIDUE_COUNT as f32
+    }
 }
 
 fn cluster_sample_segments(segments: &[SampleSegment], sample_count: usize) -> Vec<SampleCluster> {
@@ -1662,7 +1675,7 @@ impl PosteriorMatrix {
         flank_usage *= normalizer;
         let segment_count = self.model_length.div_ceil(4);
         let match_odds = profile.match_odds_rows();
-        let mut odds = [0.0_f32; 20];
+        let mut odds = [0.0_f32; CANONICAL_RESIDUE_COUNT];
         for (residue, value) in odds.iter_mut().enumerate() {
             let mut lanes = [0.0_f32; 4];
             for segment in 0..segment_count {
@@ -1679,7 +1692,7 @@ impl PosteriorMatrix {
         }
         let correction: f32 = sequence
             .iter()
-            .map(|residue| odds[usize::from(*residue)].ln())
+            .map(|residue| null2_odds_for_residue(&odds, *residue).ln())
             .sum();
         logsum(0.0, -(256.0_f32).ln() + correction) / LN_2
     }

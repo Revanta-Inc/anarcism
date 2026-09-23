@@ -1,11 +1,35 @@
 use std::sync::OnceLock;
 
+use crate::sequence::{CANONICAL_RESIDUE_COUNT, RESIDUE_CODE_COUNT, UNKNOWN_RESIDUE_INDEX};
 use crate::{ChainType, Error, Result};
 
 const MAGIC: &[u8; 8] = b"ANRCPRF3";
 const FORMAT_VERSION: u16 = 3;
-const ALPHABET_SIZE: usize = 20;
 const TRANSITION_COUNT: usize = 7;
+const MSV_SCORE_SCALE: f32 = 3.0 / std::f32::consts::LN_2;
+// HMMER's default amino-acid background, in AMINO_ALPHABET order.
+const BACKGROUND: [f32; CANONICAL_RESIDUE_COUNT] = [
+    0.078_794_5,
+    0.015_160_0,
+    0.053_522_2,
+    0.066_829_8,
+    0.039_706_2,
+    0.069_507_1,
+    0.022_919_8,
+    0.059_009_2,
+    0.059_442_2,
+    0.096_372_8,
+    0.023_771_8,
+    0.041_438_6,
+    0.048_290_4,
+    0.039_563_9,
+    0.054_097_8,
+    0.068_336_4,
+    0.054_068_7,
+    0.067_341_7,
+    0.011_413_5,
+    0.030_413_3,
+];
 pub(crate) const MAX_MODEL_LENGTH: usize = 256;
 
 /// Return the process-wide decoded profile database.
@@ -71,14 +95,22 @@ impl<'a> ProfileDatabase<'a> {
             }
             let consensus = reader.take(model_length)?;
             let msv_bias = reader.u8()?;
-            let msv_match_costs = reader.take(checked_size(&[model_length, ALPHABET_SIZE])?)?;
+            let canonical_msv_match_costs =
+                reader.take(checked_size(&[model_length, CANONICAL_RESIDUE_COUNT])?)?;
             let local_entry = decode_scores(
                 reader.take(checked_size(&[model_length, 3])?)?,
                 inverse_scale,
             );
-            let match_scores = decode_scores(
-                reader.take(checked_size(&[model_length, ALPHABET_SIZE, 3])?)?,
+            let canonical_match_scores = decode_scores(
+                reader.take(checked_size(&[model_length, CANONICAL_RESIDUE_COUNT, 3])?)?,
                 inverse_scale,
+            );
+            let match_scores = add_unknown_match_scores(&canonical_match_scores);
+            let msv_match_costs = add_unknown_msv_match_costs(
+                canonical_msv_match_costs,
+                &match_scores,
+                model_length,
+                msv_bias,
             );
             let match_odds = match_scores.iter().map(|score| score.exp()).collect();
             let transition_scores = decode_scores(
@@ -137,7 +169,7 @@ pub struct Profile<'a> {
     msv_mu: f32,
     msv_lambda: f32,
     msv_bias: u8,
-    msv_match_costs: &'a [u8],
+    msv_match_costs: Box<[u8]>,
     forward_tau: f32,
     forward_lambda: f32,
     consensus: &'a [u8],
@@ -201,7 +233,7 @@ impl Profile<'_> {
 
     #[inline]
     pub(crate) fn match_score(&self, model_position: usize, residue_index: usize) -> f32 {
-        self.match_scores[(model_position - 1) * ALPHABET_SIZE + residue_index]
+        self.match_scores[(model_position - 1) * RESIDUE_CODE_COUNT + residue_index]
     }
 
     #[inline]
@@ -215,14 +247,14 @@ impl Profile<'_> {
     }
 
     #[inline]
-    pub(crate) fn match_score_rows(&self) -> &[[f32; ALPHABET_SIZE]] {
+    pub(crate) fn match_score_rows(&self) -> &[[f32; RESIDUE_CODE_COUNT]] {
         let (rows, remainder) = self.match_scores.as_chunks();
         debug_assert!(remainder.is_empty());
         rows
     }
 
     #[inline]
-    pub(crate) fn match_odds_rows(&self) -> &[[f32; ALPHABET_SIZE]] {
+    pub(crate) fn match_odds_rows(&self) -> &[[f32; RESIDUE_CODE_COUNT]] {
         let (rows, remainder) = self.match_odds.as_chunks();
         debug_assert!(remainder.is_empty());
         rows
@@ -234,6 +266,59 @@ impl Profile<'_> {
         debug_assert!(remainder.is_empty());
         rows
     }
+}
+
+fn add_unknown_match_scores(canonical_scores: &[f32]) -> Box<[f32]> {
+    debug_assert_eq!(canonical_scores.len() % CANONICAL_RESIDUE_COUNT, 0);
+    let mut scores =
+        Vec::with_capacity(canonical_scores.len() / CANONICAL_RESIDUE_COUNT * RESIDUE_CODE_COUNT);
+    for canonical_row in canonical_scores.chunks_exact(CANONICAL_RESIDUE_COUNT) {
+        scores.extend_from_slice(canonical_row);
+        scores.push(unknown_match_score(canonical_row));
+    }
+    scores.into_boxed_slice()
+}
+
+// HMMER configures the all-degenerate X symbol as the background-weighted
+// expected score over the canonical amino acids.
+fn unknown_match_score(canonical_scores: &[f32]) -> f32 {
+    debug_assert_eq!(canonical_scores.len(), CANONICAL_RESIDUE_COUNT);
+    let mut weighted_score = 0.0_f32;
+    let mut total_probability = 0.0_f32;
+    for (score, probability) in canonical_scores.iter().zip(BACKGROUND) {
+        weighted_score += score * probability;
+        total_probability += probability;
+    }
+    weighted_score / total_probability
+}
+
+fn add_unknown_msv_match_costs(
+    canonical_costs: &[u8],
+    match_scores: &[f32],
+    model_length: usize,
+    bias: u8,
+) -> Box<[u8]> {
+    debug_assert_eq!(
+        canonical_costs.len(),
+        model_length * CANONICAL_RESIDUE_COUNT
+    );
+    debug_assert_eq!(match_scores.len(), model_length * RESIDUE_CODE_COUNT);
+    let mut costs = Vec::with_capacity(model_length * RESIDUE_CODE_COUNT);
+    costs.extend_from_slice(canonical_costs);
+    costs.extend(
+        match_scores
+            .chunks_exact(RESIDUE_CODE_COUNT)
+            .map(|row| msv_biased_byte_cost(row[usize::from(UNKNOWN_RESIDUE_INDEX)], bias)),
+    );
+    costs.into_boxed_slice()
+}
+
+fn msv_biased_byte_cost(score: f32, bias: u8) -> u8 {
+    if !score.is_finite() {
+        return u8::MAX;
+    }
+    let cost = -(MSV_SCORE_SCALE * score).round() as i32 + i32::from(bias);
+    cost.clamp(0, i32::from(u8::MAX)) as u8
 }
 
 fn decode_scores(bytes: &[u8], inverse_scale: f32) -> Box<[f32]> {
@@ -341,5 +426,21 @@ mod tests {
             decode_score(&[0, 0, 0x80], inverse_scale),
             f32::NEG_INFINITY
         );
+    }
+
+    #[test]
+    fn embedded_profiles_expand_x_with_hmmer_degenerate_scores() {
+        let profile = &embedded_profiles().unwrap().profiles()[0];
+        let unknown = usize::from(UNKNOWN_RESIDUE_INDEX);
+        for model_position in [1, 64, 128] {
+            let row = &profile.match_score_rows()[model_position - 1];
+            let expected = unknown_match_score(&row[..CANONICAL_RESIDUE_COUNT]);
+            assert_eq!(row[unknown], expected);
+            assert_eq!(profile.match_score(model_position, unknown), expected);
+            assert_eq!(
+                profile.msv_match_costs_for_residue(unknown)[model_position - 1],
+                msv_biased_byte_cost(expected, profile.msv_bias())
+            );
+        }
     }
 }
