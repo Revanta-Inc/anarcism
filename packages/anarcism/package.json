@@ -1,8 +1,13 @@
 {
-	"name": "anarcism",
+	"name": "@revanta/anarcism",
 	"version": "1.0.0",
 	"description": "ANARCI-compatible IMGT numbering in WebAssembly for browsers and Node.js",
 	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Revanta-Inc/anarcism.git",
+		"directory": "packages/anarcism"
+	},
 	"files": [
 		"dist"
 	],
@@ -18,6 +23,9 @@
 			"import": "./dist/worker-pool.js"
 		},
 		"./anarcism.wasm": "./dist/anarcism.wasm"
+	},
+	"publishConfig": {
+		"access": "public"
 	},
 	"scripts": {
 		"build": "../../tools/build-js.sh",

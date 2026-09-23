@@ -58,13 +58,13 @@ ln -s "$(command -v anarcism)" "$(dirname "$(command -v anarcism)")/ANARCI"
 ## JavaScript
 
 ```sh
-npm install anarcism
+npm install @revanta/anarcism
 ```
 
 The package runs in modern browsers and Node.js 20.16+. It requires WebAssembly SIMD128 but not WASM threads or shared memory.
 
 ```js
-import { Anarcism } from "anarcism";
+import { Anarcism } from "@revanta/anarcism";
 
 const anarcism = await Anarcism.create();
 
@@ -89,7 +89,7 @@ const pair = anarcism.validateAntibodyPair(vh, vl);
 The synchronous API is suitable for interactive calls. For large batches in the browser, the worker-pool entry point runs independent WASM engines in Web Workers without blocking the page:
 
 ```js
-import { AnarcismWorkerPool } from "anarcism/worker-pool";
+import { AnarcismWorkerPool } from "@revanta/anarcism/worker-pool";
 
 const pool = await AnarcismWorkerPool.create({ workers: 4 });
 const results = await pool.numberSequences(inputs);
