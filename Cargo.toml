@@ -20,16 +20,13 @@ serde = { version = "1.0.228", default-features = false, features = ["derive", "
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
-# The golden corpus and property tests are compute-bound, so an unoptimized
-# build dominates test wall clock. Optimizing keeps the run short while the
-# debug assertions and integer overflow checks that guard the DP kernels stay
-# on; `dev` is left alone so iterative builds stay fast to compile.
+# Optimize compute-heavy tests without disabling debug or overflow checks.
 [profile.test]
 opt-level = 2
 debug-assertions = true
@@ -38,14 +35,13 @@ overflow-checks = true
 [profile.bench]
 inherits = "release"
 debug = true
+opt-level = 3
 
 [profile.benchmark]
 inherits = "release"
 opt-level = 3
 
-# Python extension modules. `opt-level = "z"` exists for the browser byte
-# budget, which a wheel does not have, and PyO3 needs unwinding to turn a Rust
-# panic into a Python exception instead of aborting the interpreter.
+# PyO3 needs unwinding to convert Rust panics into Python exceptions.
 [profile.python]
 inherits = "release"
 opt-level = 3
