@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import { DEFAULT_SEQUENCE, EXAMPLES } from "./examples.ts";
 import { Results } from "./results.tsx";
@@ -39,6 +39,7 @@ interface Timings {
 
 export function App() {
 	const pool = useRef<AnalysisPool | null>(null);
+	const autoRan = useRef(false);
 	const [version, setVersion] = useState<string | null>(null);
 	const [chains, setChains] = useState<ChainType[]>([]);
 	const [species, setSpecies] = useState<string[]>([]);
@@ -92,6 +93,14 @@ export function App() {
 			pool.current = null;
 		};
 	}, []);
+
+	// Number the initial input as soon as the pool is ready. A layout effect
+	// starts the run before the first ready frame paints.
+	useLayoutEffect(() => {
+		if (!ready || autoRan.current) return;
+		autoRan.current = true;
+		void run(sequence);
+	}, [ready]);
 
 	function patch(changes: Partial<Settings>) {
 		setSettings((current) => ({ ...current, ...changes }));
@@ -333,7 +342,7 @@ export function App() {
 						<Results results={results} />
 					) : (
 						<p class="text-sm text-zinc-500 italic">
-							{ready ? "Ready. Press Number." : "Loading module…"}
+							{busy ?? "Enter a sequence or FASTA to number."}
 						</p>
 					)}
 				</section>
