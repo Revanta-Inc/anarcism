@@ -4,73 +4,24 @@
 
 # anarcism
 
-`anarcism` is a self-contained Rust implementation of the ANARCI behavior needed to recognize and IMGT-number immunoglobulin and T-cell-receptor variable domains, with WebAssembly/browser and Python interfaces. It runs locally, bundles every H/K/L/A/B/G/D profile in ANARCI 2026.2.13.2, supports multiple domains and optional V/J assignment, and makes no runtime network request for models or sequence analysis.
+`anarcism` recognizes and IMGT-numbers antibody and T-cell-receptor variable domains. The engine is written in Rust and ships as a self-contained Python extension and WebAssembly package: analysis runs locally, with no HMMER binary, model download, or backend request.
 
-The complete counted browser package is 314,492 bytes with gzip and 265,996 bytes with Brotli, below the 500,000-byte limits. See [size and performance measurements](docs/benchmarks.md) for the exact reproducible report.
+It supports H/K/L/A/B/G/D chains, multidomain inputs, FASTA, configurable profile filters, alternative hits, V/J germline assignment, and VH/VL pair validation.
 
-## Browser use
+## Features
 
-Build the package, then initialize the WASM module before using the synchronous numbering calls:
+Compared with the official ANARCI implementation:
+
+- Self-contained installation without legacy hooks or HMMER
+- Bounded-memory FASTA streaming with lower end-to-end time on large inputs
+- Efficient multicore scaling
+- WebAssembly package for browsers and Node.js
+
+## Python and CLI
 
 ```sh
-tools/build-browser.sh
+pip install anarcism
 ```
-
-The release artifact requires WebAssembly SIMD128 but does not require WASM threads or shared memory.
-
-```js
-import init, {
-	numberSequence,
-	numberSequences,
-	numberFasta,
-	validateAntibodyPair,
-} from "@revanta/anarcism";
-
-const engine = await init();
-
-engine.version; // package version
-engine.chains(); // chain types present in the embedded profiles
-engine.species(); // species present in the embedded profiles
-
-const result = numberSequence(vh, {
-	allowedChains: ["H", "K", "L"],
-	allowedSpecies: ["human", "mouse"],
-	minBitScore: 80,
-	alternativeHitCount: 3,
-	assignGermline: true,
-});
-
-const batch = numberSequences([
-	{ id: "heavy", sequence: vh },
-	{ id: "light", sequence: vl },
-]);
-
-const fastaResults = numberFasta(`>heavy\n${vh}\n`);
-const pair = validateAntibodyPair(vh, vl, { startMax: 10, endMin: 100 });
-```
-
-`initSync(bytesOrModule)` is also available for applications that already have WASM bytes or a compiled `WebAssembly.Module`. Once initialized, all analysis methods are synchronous. No method sends a sequence anywhere.
-
-Errors are thrown as `AnarcismError` with `code`, `message`, and optional `inputId` fields. TypeScript declarations are included in the package.
-
-For lower browser batch latency, the optional asynchronous worker-pool entry point creates one independently initialized WASM engine per worker. It balances records by sequence length and restores input order before resolving:
-
-```js
-import { AnarcismWorkerPool } from "@revanta/anarcism/worker-pool";
-
-const pool = new AnarcismWorkerPool();
-await pool.initialize(4);
-const batch = await pool.numberSequences(inputs, { minBitScore: 80 });
-await pool.resize(8);
-const fastaResults = await pool.numberFasta(fasta);
-pool.terminate();
-```
-
-The synchronous browser API remains single-threaded and requires no WASM threads or shared memory. Native Rust callers can opt into multicore batches with `number_sequences_parallel(inputs, options, worker_count)`. Both parallel APIs take an explicit worker count to avoid oversubscribing applications that already manage parallel work, and both preserve input order.
-
-## Python use
-
-The Python wheel contains the same embedded Rust engine and has no runtime dependency on ANARCI, HMMER, or model files:
 
 ```python
 import anarcism
@@ -80,100 +31,122 @@ batch = anarcism.number_sequences(
     [("heavy", vh), ("light", vl)],
     workers=4,
 )
+
+# Iterable input and output keep large datasets bounded in memory.
+with open("sequences.fasta") as fasta:
+    for result in anarcism.iter_number_fasta(fasta, workers=4):
+        consume(result)
 ```
 
-It installs the `ANARCI` compatibility command plus the `anarcism` package-native spelling; `python -m anarcism` is equivalent. The command uses ANARCI's vertical output by default and supports its IMGT-capable options:
+The `anarcism` command and `python -m anarcism` provide ANARCI-compatible IMGT vertical, CSV, and hit-table output:
 
 ```sh
-ANARCI -i EVQLVESGGGLVQPGGSLRLSC...
-ANARCI -i sequences.fasta -o numbered.anarci -p 8
-ANARCI -i sequences.fasta -o numbered --csv --assign_germline
-ANARCI -i sequences.fasta -r ig --use_species human
+anarcism -i sequences.fasta -o numbered.anarci -p 8
+anarcism -i sequences.fasta -o numbered --csv --assign_germline
+anarcism -i sequences.fasta -o numbered.anarci -ht hits.txt
+gunzip -c sequences.fasta.gz | anarcism -i - -o numbered.anarci
 ```
 
-`-i/--sequence`, `-o/--outfile`, `-s/--scheme` (`imgt` or `i`), `-r/--restrict`, `--csv`, `-p/--ncpu`, `--assign_germline`, `--use_species`, and `--bit_score_threshold` match ANARCI's flag names and output layout. Scores are rendered to one decimal place and E-values to two significant digits, matching the precision of ANARCI's HMMER text output. Other numbering schemes are intentionally rejected. `--hmmerpath` is inapplicable because the backend is embedded, and `--outfile_hits` is not yet exposed because the public result does not contain HMMER's full hit-table bias and coordinate fields.
+Run `anarcism --help` for the supported ANARCI flags. Only IMGT numbering is implemented; `--hmmerpath` is unnecessary because the backend is embedded.
 
-## Output conventions
+`anarcism` is a drop-in replacement for the official ANARCI executable. To avoid changing scripts that call `ANARCI`, create a symlink:
 
-- `start` and `end` are zero-based, half-open input coordinates: `[start, end)`.
-- `numbering` contains residues only; HMM deletion states are omitted.
-- `paddedImgtAlignment` is local to one detected domain. It contains `-` for missing IMGT positions, includes insertion residues beside their anchor, can exceed 128 characters when insertions occur, and may end before 128 for a C-terminal truncation. Input flanks are not included.
-- Region annotations use FR1 1–26, CDR1 27–38, FR2 39–55, CDR2 56–65, FR3 66–104, CDR3 105–117, and FR4 118–128.
-- `eValue` is HMMER's independent domain E-value (`i-Evalue`), calculated from the profile's Forward `tau`/`lambda`, the null2-corrected domain bit score, and ANARCI's complete 29-profile search space. It is present for the selected domain and every alternative hit. Conditional domain E-values and whole-sequence E-values are not returned.
-- There is no confidence field. Alternative profile hits expose the underlying score separation directly.
+```sh
+ln -s "$(command -v anarcism)" "$(dirname "$(command -v anarcism)")/ANARCI"
+```
 
-## Scope and limits
+## JavaScript
 
-The embedded profile inventory covers human, mouse, rat, rabbit, rhesus, pig, alpaca, and cow wherever the pinned ANARCI release supplies a profile. Input limits are 10,000 residues per sequence, 1,000 records per batch, and 10 MiB per FASTA document. Only the 20 canonical amino-acid symbols are accepted after ASCII whitespace removal and uppercase normalization.
+```sh
+npm install anarcism
+```
 
-The default bit-score threshold is 80. `allowedSpecies` is deliberately strict: unavailable or nonmatching species do not silently fall back to all profiles as some ANARCI paths do.
+The package runs in modern browsers and Node.js 20.16+. It requires WebAssembly SIMD128 but not WASM threads or shared memory.
 
-## Validation status
+```js
+import { Anarcism } from "anarcism";
 
-The checked-in `corpus_v2` golden corpus contains 1,397 cases and 1,399 accepted domains across IG H/K/L and TR A/B/G/D, including truncation, CDR-length ladders, insertion/deletion, scFv, multidomain, boundary, constant-domain, and negative controls. Against pinned ANARCI/HMMER it currently has:
+const anarcism = await Anarcism.create();
 
-- 1,399/1,399 exact domain calls, chain/species classifications, boundaries, and padded alignments
-- 153,249/153,249 exact residue indices, IMGT positions, and insertion codes
-- maximum absolute bit-score difference of 0.1432 bits
-- 1,129/1,399 independent E-values within HMMER's two-significant-digit display precision, with 1.16% mean and 6.79% maximum relative difference
+const result = anarcism.numberSequence(vh, {
+	allowedChains: ["H", "K", "L"],
+	minBitScore: 80,
+	alternativeHitCount: 3,
+	assignGermline: true,
+});
 
-The residual score difference comes from high-precision profile quantization and scalar arithmetic; see [compatibility](docs/compatibility.md). Chromium and WebKit pass locally. Firefox is configured in the Playwright/CI matrix, but the downloaded Firefox 153 runner could not launch in the current macOS sandbox; even a blank-page launch stalled before loading this project.
+const batch = anarcism.numberSequences([
+	{ id: "heavy", sequence: vh },
+	{ id: "light", sequence: vl },
+]);
 
-## Repository map
+const fastaResults = anarcism.numberFasta(`>heavy\n${vh}\n`);
+const pair = anarcism.validateAntibodyPair(vh, vl);
+```
 
-- `crates/anarcism-core`: safe Rust sequence, HMM, numbering, FASTA, pair, and germline engine
-- `crates/anarcism-modelgen`: deterministic compact profile and germline generators
-- `crates/anarcism-wasm`: minimal JSON-over-C-ABI WASM bridge
-- `browser`: JavaScript package, declarations, Node and Playwright tests, benchmarks
-- `assets`: embedded model binaries and provenance manifest
-- `tests/golden`: pinned reference corpus
-- `fuzz`: libFuzzer targets for both decoders and untrusted text
-- `demo`: Preact, Vite, and Tailwind demo application, deployed to GitHub Pages
+`Anarcism.create()` loads the bundled `anarcism.wasm`; pass `{ source }` with a URL, `Response`, bytes, or a compiled `WebAssembly.Module` to load it from elsewhere. `Anarcism.createSync(bytesOrModule)` instantiates without awaiting. Each instance owns an independent WebAssembly engine.
+
+The synchronous API is suitable for interactive calls. For large batches in the browser, the worker-pool entry point runs independent WASM engines in Web Workers without blocking the page:
+
+```js
+import { AnarcismWorkerPool } from "anarcism/worker-pool";
+
+const pool = await AnarcismWorkerPool.create({ workers: 4 });
+const results = await pool.numberSequences(inputs);
+pool.terminate();
+```
+
+Every asynchronous call accepts an `AbortSignal`. An aborted call rejects with `signal.reason`; the pool replaces the workers still computing it, so it stays usable at the same size:
+
+```js
+const controller = new AbortController();
+const pending = pool.numberSequences(inputs, { signal: controller.signal });
+controller.abort();
+
+const anarcism = await Anarcism.create({ signal: AbortSignal.timeout(5_000) });
+```
+
+TypeScript declarations are included. Invalid input raises `AnarcismError` with a stable `code`, message, and optional input ID.
+
+## Compatibility and size
+
+The reference is [ANARCI](https://github.com/oxpig/ANARCI) (OPIG) with HMMER 3.4, pinned in [`assets/MANIFEST.toml`](assets/MANIFEST.toml). The parity corpus holds 1,397 sequences (1,398 domains). It combines natural antibody and TCR sequences, IMGT germlines, and published PDB chains with deliberately adversarial stress tests: synthetic CDR-length ladders, framework indels, truncations, scFvs, multidomain constructs, constant domains, and non-antibody decoys.
+
+| criterion                        | result                          |
+| -------------------------------- | ------------------------------- |
+| domain detection                 | 1,397/1,397 sequences (100%)    |
+| chain classification             | 1,398/1,398 domains (100%)      |
+| species assignment               | 1,398/1,398 domains (100%)      |
+| domain boundaries                | 1,398/1,398 domains (100%)      |
+| IMGT numbering, exact per domain | 1,398/1,398 domains (100%)      |
+| IMGT numbering, per residue      | 153,213/153,213 residues (100%) |
+| germline V and J genes           | 1,398/1,398 domains (100%)      |
+
+A domain counts as exactly numbered only if every residue's IMGT position and insertion code, and its padded IMGT alignment, match ANARCI. Bit scores stay within 0.15 bits of HMMER's (mean 0.03) and E-values within 7% (mean 1.2%). The reference values live in [`tests/golden/corpus_reference.jsonl`](tests/golden/corpus_reference.jsonl). The Rust and Python golden tests check every row against it, and `npm --workspace packages/anarcism run parity` reports domain, residue, and score parity for the WebAssembly build.
 
 ## Development
 
-`browser` and `demo` are npm workspaces of the repository root, so a single `npm ci` there installs both from the one `package-lock.json`.
+The build needs Rust and Node.js 20.16+. `rust-toolchain.toml` pins the Rust release and installs the `wasm32-unknown-unknown` target. Install [Binaryen](https://github.com/WebAssembly/binaryen) for `wasm-opt`; without it the build ships the larger, unoptimized module and prints a warning. Python and ANARCI are only needed to regenerate the reference data; they are not runtime dependencies.
 
 ```sh
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo fmt --all --check
-tools/build-browser.sh
+cargo clippy --workspace --all-targets -- -D warnings
+
 npm ci
-cd browser
-npm test
-npm run test:types
-npm run parity
-npm run test:browsers
-npm run benchmark:compare
+npm --workspace packages/anarcism run build
+npm --workspace packages/anarcism test
+npm --workspace packages/anarcism run test:browser
+npm --workspace packages/anarcism run parity
+npm --workspace demo run dev
 ```
 
-The comparison benchmark requires `uv sync --locked --no-install-project --no-default-groups --group reference` and HMMER 3.4 on `PATH`; ordinary Rust and browser builds do not.
+The package build compiles `anarcism-wasm` for `wasm32-unknown-unknown`, optimizes it with `wasm-opt -Oz`, copies the JavaScript entry points, declarations, and license files next to it in `packages/anarcism/dist/`, and prints the size report.
 
-### Demo
+## Documentation
 
-The demo is a Preact application built with Vite and Tailwind. It imports `browser/dist` through the `@anarcism` alias, so it exercises the published package the way an npm dependent would; `tools/build-browser.sh` has to run first.
+- [`docs/architecture.md`](docs/architecture.md): engine design, model provenance, and refreshing the models and reference data
 
-```sh
-npm ci               # at the repository root, once for both workspaces
-tools/build-browser.sh
-cd demo
-npm run dev          # http://localhost:5173/
-npm run build        # type-checks, then writes demo/dist
-```
-
-Analysis runs in a configurable pool of module Web Workers so synchronous WASM calls do not block the page. The demo starts one worker for low single-sequence latency, lazily grows the pool for FASTA batches, balances records across those workers, and returns results in input order.
-
-`.github/workflows/pages.yml` builds the WASM package and the demo on every push to `main` and publishes `demo/dist` to GitHub Pages, which requires Pages to be set to the GitHub Actions source once in the repository settings. The build uses a relative `base`, so the same output works under any Pages path or a custom domain.
-
-Further documentation:
-
-- [Feasibility gate](docs/feasibility.md)
-- [Algorithm and data formats](docs/algorithm.md)
-- [Compatibility and intentional differences](docs/compatibility.md)
-- [Model provenance and licensing](docs/model-provenance.md)
-- [Security and privacy](docs/security.md)
-- [Build and release](docs/build-release.md)
-- [Size and benchmark results](docs/benchmarks.md)
+## License
 
 Third-party attributions and license text are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The repository's own licensing remains `UNLICENSED`/`LicenseRef-Proprietary`; no additional project license is implied.
