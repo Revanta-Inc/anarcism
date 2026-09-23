@@ -3,22 +3,17 @@ import preact from "@preact/preset-vite";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
-// The demo consumes the built package, exactly as an npm dependent would.
-// `tools/build-browser.sh` has to run before `vite build`.
-const distribution = fileURLToPath(new URL("../browser/dist", import.meta.url));
+const distribution = fileURLToPath(new URL("../packages/anarcism/dist", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 
 export default defineConfig({
-	// Relative URLs keep one build working at any GitHub Pages path, so the
-	// repository name is not baked into the output.
+	// Keep the build independent of its deployment path.
 	base: "./",
 	plugins: [preact(), tailwindcss()],
 	resolve: {
 		alias: { "@anarcism": distribution },
 	},
 	server: {
-		// Both `browser/dist` and the workspace-hoisted `node_modules` sit outside
-		// the Vite root.
 		fs: { allow: [repositoryRoot] },
 	},
 	build: {

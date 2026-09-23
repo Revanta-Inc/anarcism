@@ -1,6 +1,6 @@
 [package]
 name = "anarcism-core"
-description = "Browser-oriented antibody/TCR recognition and IMGT numbering core"
+description = "Portable antibody/TCR recognition and IMGT numbering core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

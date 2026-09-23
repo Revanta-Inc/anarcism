@@ -2,13 +2,16 @@
 	"name": "anarcism",
 	"version": "0.1.0",
 	"private": true,
-	"description": "Workspace root for the anarcism browser package and demo",
+	"description": "Workspace root for the anarcism JavaScript package and demo",
 	"license": "UNLICENSED",
 	"workspaces": [
-		"browser",
+		"packages/anarcism",
 		"demo"
 	],
 	"type": "module",
+	"devDependencies": {
+		"oxfmt": "^0.70.0"
+	},
 	"engines": {
 		"node": ">=20.16"
 	}

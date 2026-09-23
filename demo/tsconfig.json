@@ -16,7 +16,7 @@
 		"noFallthroughCasesInSwitch": true,
 		"skipLibCheck": true,
 		"paths": {
-			"@anarcism/*": ["../browser/dist/*"]
+			"@anarcism/*": ["../packages/anarcism/dist/*"]
 		}
 	},
 	"include": ["src", "vite.config.ts"]

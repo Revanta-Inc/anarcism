@@ -3,7 +3,7 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 target_wasm="$repository_root/target/wasm32-unknown-unknown/release/anarcism_wasm.wasm"
-distribution="$repository_root/browser/dist"
+distribution="$repository_root/packages/anarcism/dist"
 
 cd "$repository_root"
 cargo build --locked --release --target wasm32-unknown-unknown -p anarcism-wasm
@@ -21,11 +21,11 @@ else
   echo "warning: wasm-opt was not found; copied the Rust-optimized artifact" >&2
 fi
 cp \
-  browser/src/index.js \
-  browser/src/index.d.ts \
-  browser/src/worker-pool.js \
-  browser/src/worker-pool.d.ts \
-  browser/src/worker.js \
+  packages/anarcism/src/index.js \
+  packages/anarcism/src/index.d.ts \
+  packages/anarcism/src/worker-pool.js \
+  packages/anarcism/src/worker-pool.d.ts \
+  packages/anarcism/src/worker.js \
   "$distribution/"
 cp THIRD_PARTY_NOTICES.md "$distribution/"
 node tools/size-report.mjs

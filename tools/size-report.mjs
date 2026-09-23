@@ -4,14 +4,14 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const files = [
-	"browser/dist/anarcism.wasm",
-	"browser/dist/index.js",
-	"browser/dist/index.d.ts",
-	"browser/dist/worker-pool.js",
-	"browser/dist/worker-pool.d.ts",
-	"browser/dist/worker.js",
-	"browser/dist/THIRD_PARTY_NOTICES.md",
-	"browser/package.json",
+	"packages/anarcism/dist/anarcism.wasm",
+	"packages/anarcism/dist/index.js",
+	"packages/anarcism/dist/index.d.ts",
+	"packages/anarcism/dist/worker-pool.js",
+	"packages/anarcism/dist/worker-pool.d.ts",
+	"packages/anarcism/dist/worker.js",
+	"packages/anarcism/dist/THIRD_PARTY_NOTICES.md",
+	"packages/anarcism/package.json",
 ];
 const limit = 500_000;
 
@@ -51,9 +51,7 @@ const rustRelease = "target/wasm32-unknown-unknown/release/anarcism_wasm.wasm";
 try {
 	const row = sizes(rustRelease);
 	console.log(`${rustRelease} (Rust release)\t${row.raw}\t${row.gzip}\t${row.brotli}`);
-} catch {
-	// This file is optional when inspecting an unpacked npm package.
-}
+} catch {}
 
 if (total.gzip >= limit || total.brotli >= limit) {
 	console.error(`compressed distribution exceeds the ${limit}-byte budget`);

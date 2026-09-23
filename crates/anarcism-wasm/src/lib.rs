@@ -1,4 +1,4 @@
-//! Minimal JSON-over-C-ABI bridge for modern browsers.
+//! Minimal JSON-over-C-ABI bridge for JavaScript hosts (browsers and Node.js).
 //! The JavaScript wrapper is public; raw exports are internal.
 
 use anarcism_core::{
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn anarcism_free(pointer: u32, length: u32) {
         return;
     }
     let raw = std::ptr::slice_from_raw_parts_mut(pointer as *mut u8, length as usize);
-    // SAFETY: The browser wrapper passes exactly the pointer and length returned
+    // SAFETY: The JavaScript wrapper passes exactly the pointer and length returned
     // by anarcism_alloc or anarcism_call, and relinquishes each allocation once.
     drop(unsafe { Box::from_raw(raw) });
 }
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn anarcism_call(pointer: u32, length: u32) -> u64 {
             message: format!("API request contains {length} bytes; limit is {MAX_REQUEST_BYTES}"),
         }));
     }
-    // SAFETY: The browser wrapper creates this region with anarcism_alloc and
+    // SAFETY: The JavaScript wrapper creates this region with anarcism_alloc and
     // writes `length` bytes before making the call.
     let request = unsafe { std::slice::from_raw_parts(pointer as *const u8, length) };
     pack_response(handle_request(request))

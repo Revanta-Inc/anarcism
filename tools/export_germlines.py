@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the versioned ANARCI/IMGT germline table for the Rust asset generator.
 
-This is a build-time provenance tool. The generated browser package never
+This is a build-time provenance tool. The generated JavaScript package never
 imports Python or ANARCI.
 """
 

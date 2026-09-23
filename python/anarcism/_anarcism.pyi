@@ -1,7 +1,7 @@
 """Type stubs for the compiled extension module.
 
-Keep this in step with `crates/anarcism-python/src/lib.rs` and with the browser
-declarations in `browser/src/index.d.ts`; the three describe one contract.
+Keep this in step with `crates/anarcism-python/src/lib.rs` and with the JavaScript
+declarations in `packages/anarcism/src/index.d.ts`; the three describe one contract.
 """
 
 from typing import Any, Final, Literal

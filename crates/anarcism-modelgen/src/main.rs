@@ -1,5 +1,5 @@
 //! Convert a versioned ANARCI-generated HMMER3/f database into the compact,
-//! deterministic representation embedded by the browser engine.
+//! deterministic representation embedded by the engine.
 
 use std::env;
 use std::fmt::{self, Display};
