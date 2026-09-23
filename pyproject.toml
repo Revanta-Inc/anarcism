@@ -22,7 +22,7 @@ dependencies = []
 anarcism = "anarcism.cli:main"
 
 [project.urls]
-Repository = "https://github.com/revanta/anarcism"
+Repository = "https://github.com/revanta-inc/anarcism"
 
 [build-system]
 requires = ["maturin>=1.9,<2.0"]

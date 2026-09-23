@@ -13,7 +13,7 @@ edition = "2024"
 rust-version = "1.94"
 authors = ["Moritz Onken <mo@revanta.bio>"]
 license = "Apache-2.0"
-repository = "https://github.com/revanta/anarcism"
+repository = "https://github.com/revanta-inc/anarcism"
 
 [workspace.dependencies]
 serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
