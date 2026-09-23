@@ -26,6 +26,7 @@ from ._anarcism import (
     species,
     validate_antibody_pair,
 )
+from .streaming import iter_fasta, iter_number_fasta, iter_number_sequences
 
 __all__ = [
     "AnarcismError",
@@ -37,6 +38,9 @@ __all__ = [
     "SequenceResult",
     "__version__",
     "chains",
+    "iter_fasta",
+    "iter_number_fasta",
+    "iter_number_sequences",
     "number_fasta",
     "number_sequence",
     "number_sequences",

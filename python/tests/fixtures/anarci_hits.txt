@@ -1,0 +1,8 @@
+# Hit file for ANARCI
+NAME     Input sequence
+SEQUENCE EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTIS
+SEQUENCE ADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS
+         id description      evalue    bitscore        bias query_start   query_end
+    human_H                 2.1e-60       193.6         0.5           0         120
+    mouse_H                 2.7e-56       180.2         0.1           0         120
+//

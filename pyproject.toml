@@ -1,7 +1,7 @@
 [project]
 name = "anarcism"
 version = "0.1.0"
-description = "ANARCI-compatible IMGT numbering for antibody and TCR variable domains, with no external tools or data files"
+description = "ANARCI-compatible IMGT numbering for antibody and TCR variable domains, with no external dependencies."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Moritz Onken", email = "mo@revanta.bio" }]
@@ -18,6 +18,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+anarcism = "anarcism.cli:main"
+
 [project.urls]
 Repository = "https://github.com/revanta/anarcism"
 
@@ -26,22 +29,13 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-# The bindings crate is a workspace member, so the build is driven from the
-# repository root: `manifest-path` selects the crate and the sdist then carries
-# the whole workspace. Pure-Rust sources plus `python-source` gives a mixed
-# layout, so stubs and any pure-Python layer ship alongside the extension.
 manifest-path = "crates/anarcism-python/Cargo.toml"
 module-name = "anarcism._anarcism"
 python-source = "python"
 features = ["pyo3/extension-module"]
 profile = "python"
-# `cargo package --list` only reports files inside the selected crate, so the
-# embedded model binaries and the notices have to be named explicitly or the
-# sdist produces a wheel that cannot compile. `rust-toolchain.toml` is
-# deliberately absent: it pins an exact channel plus a wasm target that the
-# wheel never needs, and shipping it would force that download on anyone
-# building from source. `rust-version` in the crate reports a too-old toolchain.
 include = [
+	{ path = ".cargo/config.toml", format = "sdist" },
 	{ path = "assets/**/*", format = "sdist" },
 	{ path = "THIRD_PARTY_NOTICES.md", format = "sdist" },
 ]

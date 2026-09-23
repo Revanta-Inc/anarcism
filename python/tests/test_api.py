@@ -1,9 +1,8 @@
-"""Behaviour of the Python surface: options, errors, types, and GIL release."""
-
 from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from io import StringIO
 
 import pytest
 
@@ -34,20 +33,34 @@ def test_number_sequence_defaults():
     assert domain.chain_type == "H"
     assert domain.receptor_type == "IG"
     assert domain.start == 0
-    # The trailing residue of this construct falls outside FR4, so the detected
-    # domain deliberately stops short of the full input.
     assert domain.end == 120 < len(VH)
     assert len(domain.padded_imgt_alignment) >= 128
-    # E-values are deliberately absent in this release.
-    assert domain.e_value is None
+    assert domain.e_value > 0.0
+    assert domain.bias >= 0.0
+    assert 0 <= domain.query_start < domain.query_end <= len(VH)
+    assert domain.alternative_hits[0].bias >= 0.0
+    assert domain.alternative_hits[0].query_end <= len(VH)
     assert domain.germline is None
 
 
 def test_custom_id_is_returned_and_used_in_errors():
     assert anarcism.number_sequence(VH, id="heavy").id == "heavy"
     with pytest.raises(anarcism.AnarcismError) as excinfo:
-        anarcism.number_sequence("XXXX", id="bad-record")
+        anarcism.number_sequence("!!!!", id="bad-record")
     assert excinfo.value.input_id == "bad-record"
+
+
+def test_unknown_residue_is_supported_and_preserved():
+    unknown_index = 60
+    sequence = VH[:unknown_index] + "X" + VH[unknown_index + 1 :]
+    result = anarcism.number_sequence(sequence)
+    residue = next(
+        residue
+        for residue in result.domains[0].numbering
+        if residue.sequence_index == unknown_index
+    )
+    assert result.normalized_sequence == sequence
+    assert residue.amino_acid == "X"
 
 
 def test_regions_cover_the_imgt_boundaries():
@@ -61,17 +74,36 @@ def test_regions_cover_the_imgt_boundaries():
 
 
 def test_alternative_hit_count_bounds_the_hit_list():
-    assert len(anarcism.number_sequence(VH, alternative_hit_count=1).domains[0].alternative_hits) == 1
-    assert len(anarcism.number_sequence(VH, alternative_hit_count=0).domains[0].alternative_hits) == 0
+    assert (
+        len(
+            anarcism.number_sequence(VH, alternative_hit_count=1)
+            .domains[0]
+            .alternative_hits
+        )
+        == 1
+    )
+    assert (
+        len(
+            anarcism.number_sequence(VH, alternative_hit_count=0)
+            .domains[0]
+            .alternative_hits
+        )
+        == 0
+    )
 
 
 def test_allowed_chains_is_strict_and_case_insensitive():
     assert anarcism.number_sequence(VH, allowed_chains=["K", "L"]).domains == []
-    assert anarcism.number_sequence(VH, allowed_chains=["h"]).domains[0].chain_type == "H"
+    assert (
+        anarcism.number_sequence(VH, allowed_chains=["h"]).domains[0].chain_type == "H"
+    )
 
 
 def test_allowed_species_is_strict():
-    assert anarcism.number_sequence(VH, allowed_species=["human"]).domains[0].species == "human"
+    assert (
+        anarcism.number_sequence(VH, allowed_species=["human"]).domains[0].species
+        == "human"
+    )
 
 
 def test_min_bit_score_filters_domains():
@@ -95,6 +127,48 @@ def test_number_sequences_preserves_order():
 def test_number_fasta_reads_records():
     results = anarcism.number_fasta(f">heavy\n{VH}\n>light\n{VL}\n")
     assert [r.id for r in results] == ["heavy", "light"]
+
+
+def test_streaming_fasta_matches_an_in_memory_batch():
+    records = [("heavy-1", VH), ("light", VL), ("heavy-2", VH)]
+    fasta = "".join(f">{identifier}\n{sequence}\n" for identifier, sequence in records)
+    expected = anarcism.number_sequences(records)
+    observed = list(
+        anarcism.iter_number_fasta(
+            StringIO(fasta),
+            batch_size=2,
+            batch_residues=len(VH) + len(VL),
+        )
+    )
+    assert [result.to_dict() for result in observed] == [
+        result.to_dict() for result in expected
+    ]
+
+
+def test_fasta_parser_is_lazy():
+    def lines():
+        yield ">first\n"
+        yield f"{VH}\n"
+        yield ">second\n"
+        raise AssertionError("the parser read beyond the next FASTA header")
+
+    records = anarcism.iter_fasta(lines())
+    assert next(records) == ("first", VH)
+
+
+def test_streaming_fasta_preserves_sequence_normalization_warnings():
+    fasta = f">heavy\r\n  {VH.lower()}  \r\n"
+    expected = anarcism.number_fasta(fasta)[0]
+    observed = list(anarcism.iter_number_fasta(StringIO(fasta)))[0]
+    assert observed.to_dict() == expected.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("option", "value"), [("batch_size", 0), ("batch_residues", 0)]
+)
+def test_streaming_batch_limits_must_be_positive(option, value):
+    with pytest.raises(ValueError, match="positive integer"):
+        list(anarcism.iter_number_sequences([("heavy", VH)], **{option: value}))
 
 
 def test_validate_antibody_pair():
@@ -140,7 +214,6 @@ def test_to_dict_is_json_serializable_and_snake_case():
     [
         (lambda: anarcism.number_sequence("QQQ!QQQ"), "INVALID_SEQUENCE"),
         (lambda: anarcism.number_sequence("A" * 10_001), "SEQUENCE_TOO_LONG"),
-        (lambda: anarcism.number_sequences([("x", VH)] * 1_001), "BATCH_TOO_LARGE"),
         (lambda: anarcism.number_fasta("not a fasta document"), "INVALID_FASTA"),
     ],
 )
@@ -160,8 +233,15 @@ def test_workers_must_be_positive():
         anarcism.number_sequences([("a", VH)], workers=0)
 
 
+def test_native_batches_are_not_record_count_limited():
+    results = anarcism.number_sequences(
+        [(f"short-{index}", "A") for index in range(1_001)], workers=4
+    )
+    assert len(results) == 1_001
+    assert results[-1].id == "short-1000"
+
+
 def test_gil_is_released_so_threads_overlap():
-    """A pool must beat the serial path; if the GIL were held it would not."""
     inputs = [(f"s{i}", VH) for i in range(8)]
 
     def one(item):

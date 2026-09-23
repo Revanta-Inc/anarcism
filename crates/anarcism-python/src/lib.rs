@@ -1,4 +1,4 @@
-//! PyO3 bindings mirroring the browser API with Python naming conventions.
+//! PyO3 bindings mirroring the JavaScript API with Python naming conventions.
 //! Analysis calls release the GIL.
 
 use std::num::NonZeroUsize;
@@ -79,10 +79,10 @@ fn numbering_options(
 #[derive(Debug)]
 pub struct NumberedResidue {
     sequence_index: usize,
-    amino_acid: String,
+    amino_acid: char,
     position: u16,
     insertion_code: String,
-    region: String,
+    region: &'static str,
 }
 
 #[pymethods]
@@ -90,10 +90,10 @@ impl NumberedResidue {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         dict.set_item("sequence_index", self.sequence_index)?;
-        dict.set_item("amino_acid", &self.amino_acid)?;
+        dict.set_item("amino_acid", self.amino_acid)?;
         dict.set_item("position", self.position)?;
         dict.set_item("insertion_code", &self.insertion_code)?;
-        dict.set_item("region", &self.region)?;
+        dict.set_item("region", self.region)?;
         Ok(dict)
     }
 
@@ -109,7 +109,7 @@ impl NumberedResidue {
 #[derive(Debug)]
 pub struct ProfileHit {
     profile: String,
-    chain_type: String,
+    chain_type: &'static str,
     species: String,
     bit_score: f32,
     e_value: f64,
@@ -123,7 +123,7 @@ impl ProfileHit {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         dict.set_item("profile", &self.profile)?;
-        dict.set_item("chain_type", &self.chain_type)?;
+        dict.set_item("chain_type", self.chain_type)?;
         dict.set_item("species", &self.species)?;
         dict.set_item("bit_score", self.bit_score)?;
         dict.set_item("e_value", self.e_value)?;
@@ -174,8 +174,8 @@ impl GermlineAssignment {
 #[derive(Debug)]
 pub struct DomainResult {
     domain_index: usize,
-    receptor_type: String,
-    chain_type: String,
+    receptor_type: &'static str,
+    chain_type: &'static str,
     species: String,
     start: usize,
     end: usize,
@@ -195,8 +195,8 @@ impl DomainResult {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         dict.set_item("domain_index", self.domain_index)?;
-        dict.set_item("receptor_type", &self.receptor_type)?;
-        dict.set_item("chain_type", &self.chain_type)?;
+        dict.set_item("receptor_type", self.receptor_type)?;
+        dict.set_item("chain_type", self.chain_type)?;
         dict.set_item("species", &self.species)?;
         dict.set_item("start", self.start)?;
         dict.set_item("end", self.end)?;
@@ -254,7 +254,7 @@ impl SequenceResult {
             .map(|domain| domain.get().to_dict(py))
             .collect::<PyResult<Vec<_>>>()?;
         dict.set_item("domains", domains)?;
-        dict.set_item("warnings", self.warnings.clone())?;
+        dict.set_item("warnings", &self.warnings)?;
         Ok(dict)
     }
 
@@ -289,7 +289,7 @@ impl PairValidationResult {
             Some(domain) => dict.set_item("vl", domain.get().to_dict(py)?)?,
             None => dict.set_item("vl", py.None())?,
         }
-        dict.set_item("errors", self.errors.clone())?;
+        dict.set_item("errors", &self.errors)?;
         Ok(dict)
     }
 
@@ -311,10 +311,10 @@ fn residue_to_py(py: Python<'_>, value: CoreResidue) -> PyResult<Py<NumberedResi
         py,
         NumberedResidue {
             sequence_index: value.sequence_index,
-            amino_acid: value.amino_acid.to_string(),
+            amino_acid: value.amino_acid,
             position: value.position,
             insertion_code: value.insertion_code,
-            region: value.region.as_str().to_owned(),
+            region: value.region.as_str(),
         },
     )
 }
@@ -324,7 +324,7 @@ fn hit_to_py(py: Python<'_>, value: CoreHit) -> PyResult<Py<ProfileHit>> {
         py,
         ProfileHit {
             profile: value.profile,
-            chain_type: value.chain_type.as_str().to_owned(),
+            chain_type: value.chain_type.as_str(),
             species: value.species,
             bit_score: value.bit_score,
             e_value: value.e_value,
@@ -382,8 +382,8 @@ fn domain_to_py(py: Python<'_>, value: CoreDomain) -> PyResult<Py<DomainResult>>
         py,
         DomainResult {
             domain_index,
-            receptor_type: receptor_type.as_str().to_owned(),
-            chain_type: chain_type.as_str().to_owned(),
+            receptor_type: receptor_type.as_str(),
+            chain_type: chain_type.as_str(),
             species,
             start,
             end,
