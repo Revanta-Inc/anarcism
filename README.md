@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="demo/public/anarcism.png" alt="anarcism logo" width="300">
+  <img src="https://raw.githubusercontent.com/Revanta-Inc/anarcism/main/demo/public/anarcism.png" alt="anarcism logo" width="300">
 </p>
 
 # anarcism
@@ -7,6 +7,8 @@
 `anarcism` is an independent reimplementation of [ANARCI](https://github.com/oxpig/ANARCI) by James Dunbar and Charlotte M. Deane. It recognizes and IMGT-numbers antibody and T-cell-receptor variable domains. The engine is written in Rust and ships as a self-contained Python extension and WebAssembly package: analysis runs locally, with no HMMER binary, model download, or backend request.
 
 It supports H/K/L/A/B/G/D chains, multidomain inputs, FASTA, configurable profile filters, alternative hits, V/J germline assignment, and VH/VL pair validation.
+
+**Try it out at https://revanta-inc.github.io/anarcism/**
 
 ## Features
 
@@ -110,7 +112,7 @@ TypeScript declarations are included. Invalid input raises `AnarcismError` with 
 
 ## Compatibility and size
 
-The reference is [ANARCI](https://github.com/oxpig/ANARCI) (OPIG) with HMMER 3.4, pinned in [`assets/MANIFEST.toml`](assets/MANIFEST.toml). The parity corpus holds 1,397 sequences (1,398 domains). It combines natural antibody and TCR sequences, IMGT germlines, and published PDB chains with deliberately adversarial stress tests: synthetic CDR-length ladders, framework indels, truncations, scFvs, multidomain constructs, constant domains, and non-antibody decoys.
+The reference is [ANARCI](https://github.com/oxpig/ANARCI) (OPIG) with HMMER 3.4, pinned in [`assets/MANIFEST.toml`](https://github.com/Revanta-Inc/anarcism/blob/main/assets/MANIFEST.toml). The parity corpus holds 1,397 sequences (1,398 domains). It combines natural antibody and TCR sequences, IMGT germlines, and published PDB chains with deliberately adversarial stress tests: synthetic CDR-length ladders, framework indels, truncations, scFvs, multidomain constructs, constant domains, and non-antibody decoys.
 
 | criterion                        | result                          |
 | -------------------------------- | ------------------------------- |
@@ -122,7 +124,7 @@ The reference is [ANARCI](https://github.com/oxpig/ANARCI) (OPIG) with HMMER 3.4
 | IMGT numbering, per residue      | 153,213/153,213 residues (100%) |
 | germline V and J genes           | 1,398/1,398 domains (100%)      |
 
-A domain counts as exactly numbered only if every residue's IMGT position and insertion code, and its padded IMGT alignment, match ANARCI. Bit scores stay within 0.15 bits of HMMER's (mean 0.03) and E-values within 7% (mean 1.2%). The reference values live in [`tests/golden/corpus_reference.jsonl`](tests/golden/corpus_reference.jsonl). The Rust and Python golden tests check every row against it, and `npm --workspace packages/anarcism run parity` reports domain, residue, and score parity for the WebAssembly build.
+A domain counts as exactly numbered only if every residue's IMGT position and insertion code, and its padded IMGT alignment, match ANARCI. Bit scores stay within 0.15 bits of HMMER's (mean 0.03) and E-values within 7% (mean 1.2%). The reference values live in [`tests/golden/corpus_reference.jsonl`](https://github.com/Revanta-Inc/anarcism/blob/main/tests/golden/corpus_reference.jsonl). The Rust and Python golden tests check every row against it, and `npm --workspace packages/anarcism run parity` reports domain, residue, and score parity for the WebAssembly build.
 
 ## Development
 
@@ -142,6 +144,8 @@ npm --workspace demo run dev
 ```
 
 The package build compiles `anarcism-wasm` for `wasm32-unknown-unknown`, optimizes it with `wasm-opt -Oz`, copies the JavaScript entry points, declarations, and license files next to it in `packages/anarcism/dist/`, and prints the size report.
+
+To prepare a release, run `tools/set-version.sh <version>`, which updates the version in every manifest and lockfile. Then commit, push to `main`, and publish a GitHub release tagged `v<version>`.
 
 ## Attribution and citation
 
@@ -163,4 +167,4 @@ anarcism reproduces the methods and data of the projects below. If you use it in
 
 ## License
 
-The project's own code is licensed under the Apache License 2.0; see [`LICENSE`](LICENSE). Third-party attributions and license texts are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The project's own code is licensed under the Apache License 2.0; see [`LICENSE`](https://github.com/Revanta-Inc/anarcism/blob/main/LICENSE). Third-party attributions and license texts are in [`THIRD_PARTY_NOTICES.md`](https://github.com/Revanta-Inc/anarcism/blob/main/THIRD_PARTY_NOTICES.md).

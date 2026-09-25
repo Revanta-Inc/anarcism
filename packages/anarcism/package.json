@@ -1,6 +1,6 @@
 {
 	"name": "@revanta/anarcism",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "ANARCI-compatible IMGT numbering in WebAssembly for browsers and Node.js",
 	"license": "Apache-2.0",
 	"repository": {

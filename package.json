@@ -1,6 +1,6 @@
 {
 	"name": "anarcism",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"private": true,
 	"description": "Workspace root for the anarcism JavaScript package and demo",
 	"license": "Apache-2.0",

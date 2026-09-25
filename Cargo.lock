@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "anarcism-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "proptest",
  "serde",
@@ -14,11 +14,11 @@ dependencies = [
 
 [[package]]
 name = "anarcism-modelgen"
-version = "1.0.0"
+version = "1.0.1"
 
 [[package]]
 name = "anarcism-python"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anarcism-core",
  "pyo3",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "anarcism-wasm"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anarcism-core",
  "serde",

@@ -9,7 +9,7 @@ authors:
   - given-names: Moritz
     family-names: Onken
     affiliation: Revanta Inc
-version: 1.0.0
+version: 1.0.1
 license: Apache-2.0
 repository-code: "https://github.com/revanta-inc/anarcism"
 keywords:

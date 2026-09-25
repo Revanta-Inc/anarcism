@@ -114,6 +114,10 @@ jobs:
       - name: Install npm with staged publishing
         run: npm install --global npm@11.20.0
 
+      # npm only reads a README from the package root.
+      - name: Add the README
+        run: cp README.md packages/anarcism/README.md
+
       - name: Check the package matches the release
         working-directory: packages/anarcism
         env:

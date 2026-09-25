@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { expect, test } from "@playwright/test";
 
 const VH =
@@ -5,6 +7,7 @@ const VH =
 const VL =
 	"DIVMTQSQKFMSTSVGDRVSITCKASQNVGTAVAWYQQKPGQSPKLMIYSASNRYTGVPDRFTGSGSGTDFTLTISNMQSEDLADYFCQQYSSYPLTFGAGTKLELKR";
 const SCFV = `${VH}GGGGSGGGGSGGGGS${VL}`;
+const { version } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
 async function openFixture(page) {
 	await page.goto("/");
@@ -28,7 +31,7 @@ test("initializes one embedded engine per module worker", async ({ page }) => {
 	});
 
 	expect(metadata.workerCount).toBe(2);
-	expect(metadata.version).toBe("1.0.0");
+	expect(metadata.version).toBe(version);
 	expect(metadata.chains).toEqual(["H", "K", "L", "A", "B", "G", "D"]);
 	expect(metadata.species).toEqual([
 		"human",
